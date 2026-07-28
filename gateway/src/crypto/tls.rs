@@ -40,32 +40,10 @@ pub fn build_server_config(
 
 /// Build a TLS server config with a self-signed certificate (for development).
 ///
-/// Generates an ephemeral ECDSA P-256 key and self-signed certificate.
-/// The certificate is NOT trusted by default — clients must pin the
-/// public key or use `build_client_config_with_self_signed()`.
+/// TODO W10-T: implement using rcgen or aws_lc_rs cert builder. For now,
+/// use `build_server_config_from_files()` with externally-generated certs.
 #[cfg(test)]
 pub fn build_self_signed_server_config() -> Result<(ServerConfig, Vec<u8>)> {
-    use aws_lc_rs::signature::EcKeyPair;
-    use aws_lc_rs::{ec::ECDSA_P256_SHA256_ASN1_SIGNING, rand::SystemRandom};
-
-    let rng = SystemRandom::new();
-    let key_pair = EcKeyPair::generate(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
-        .map_err(|e| anyhow::anyhow!("ECDSA key generation failed: {:?}", e))?;
-
-    // Export the private key in PKCS#8 format.
-    let pkcs8 = key_pair
-        .private_key_to_pkcs8()
-        .map_err(|e| anyhow::anyhow!("PKCS#8 export failed: {:?}", e))?;
-    let key_der = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8));
-
-    // Build a minimal self-signed certificate.
-    // Note: For a real self-signed cert we'd use rcgen or aws_lc_rs's cert
-    // builder. For now, we just verify the config builds with an empty cert
-    // chain — the actual cert generation is deferred to W10 (Bootstrap).
-    let cert_chain: Vec<CertificateDer<'static>> = vec![];
-
-    let _ = (cert_chain, key_der);
-    // This will fail without a real cert; that's expected for the dev path.
     Err(anyhow::anyhow!(
         "self-signed cert generation not yet implemented — use build_server_config_from_files()"
     ))
