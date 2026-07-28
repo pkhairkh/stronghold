@@ -72,7 +72,7 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 /// Create an in-memory database for testing.
-#[cfg(test)]
+/// Public so integration tests can use it.
 pub fn init_memory_pool() -> Result<Pool<SqliteConnectionManager>> {
     let manager = SqliteConnectionManager::memory().with_init(|c| {
         c.execute_batch(
