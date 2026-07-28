@@ -58,10 +58,10 @@ impl Default for ScopeConfig {
 
 /// Check if a command matches a destructive scope pattern.
 /// If so, quorum re-approval is required mid-session.
-pub fn matches_deceptive_pattern(
-    config: &ScopeConfig,
+pub fn matches_deceptive_pattern<'a>(
+    config: &'a ScopeConfig,
     cmd: &str,
-) -> Option<&Scope> {
+) -> Option<&'a Scope> {
     for scope in &config.scopes {
         if scope.name == "destructive" {
             for pattern in &scope.patterns {

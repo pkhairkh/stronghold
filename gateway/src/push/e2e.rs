@@ -7,6 +7,7 @@
 //! Each push: gateway encapsulates with both → derives AES key → encrypts payload.
 
 use anyhow::Result;
+use base64::Engine;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
 
@@ -30,8 +31,10 @@ pub fn encrypt(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt
-    let cipher = Aes256Gcm::new_from_slice(&aes_key)?;
-    let ciphertext = cipher.encrypt(nonce, plaintext)?;
+    let cipher = Aes256Gcm::new_from_slice(&aes_key)
+        .map_err(|e| anyhow::anyhow!("aes-gcm key init: {:?}", e))?;
+    let ciphertext = cipher.encrypt(nonce, plaintext)
+        .map_err(|e| anyhow::anyhow!("aes-gcm encrypt: {:?}", e))?;
 
     Ok(EncryptedPayload {
         encapsulated,

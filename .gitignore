@@ -13,8 +13,9 @@ Cargo.lock
 *.pem
 !docs/examples/*.pem
 credentials.db
-audit/
+/audit/
 /keys/
+!/gateway/src/audit/
 
 # --- Runtime ---
 /stronghold-gateway

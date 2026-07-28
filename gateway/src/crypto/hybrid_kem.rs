@@ -5,15 +5,27 @@
 //! holds both public halves.
 
 use anyhow::Result;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// A hybrid KEM keypair (X25519 + ML-KEM-768).
-#[derive(Debug, Clone)]
+/// Note: does not derive Debug because x25519_dalek::StaticSecret
+/// intentionally does not implement Debug (to avoid leaking secret bytes).
+#[derive(Clone)]
 pub struct PushKeys {
     pub x25519_secret: x25519_dalek::StaticSecret,
     pub x25519_public: x25519_dalek::PublicKey,
     pub mlkem_secret: Vec<u8>,   // TODO: use ml_kem::DecapsulationKey
     pub mlkem_public: Vec<u8>,   // TODO: use ml_kem::EncapsulationKey
+}
+
+impl std::fmt::Debug for PushKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushKeys")
+            .field("x25519_public", &"[redacted]")
+            .field("mlkem_public", &"[redacted]")
+            .finish_non_exhaustive()
+    }
 }
 
 /// A hybrid KEM encapsulated secret (what the gateway sends to the phone).
@@ -45,7 +57,7 @@ impl PushKeys {
     /// Load keys from a directory, or generate new ones if not present.
     pub fn load_or_generate_keys(dir: &str) -> Result<Self> {
         let secret_path = format!("{}/push_x25519.key", dir);
-        let pub_path = format!("{}/push_x25519.pub", dir);
+        let _pub_path = format!("{}/push_x25519.pub", dir);
 
         if std::path::Path::new(&secret_path).exists() {
             // TODO: load from files

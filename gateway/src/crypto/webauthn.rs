@@ -23,7 +23,7 @@ use crate::routes::phone::WebAuthnAssertion;
 /// 3. Origin matches gateway's origin (anti-phishing)
 /// 4. `user_verified == true` (biometric/PIN was used)
 pub fn verify_assertion(
-    db: &Pool<SqliteConnectionManager>,
+    _db: &Pool<SqliteConnectionManager>,
     tenant_id: &str,
     assertion: &WebAuthnAssertion,
     request_id: &str,

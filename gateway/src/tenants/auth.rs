@@ -8,6 +8,7 @@
 //! - **Setup password**: one-time, used only for initial credential enrollment.
 
 use anyhow::Result;
+use base64::Engine;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;

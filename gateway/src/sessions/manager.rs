@@ -9,7 +9,6 @@ use tokio::time::timeout;
 
 use crate::routes::agent::{OrderRequest, OrderResponse, ExtendRequest};
 use crate::routes::AppState;
-use crate::routes::OrderResponse as SessResponse;
 
 /// Error types for session operations.
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +57,7 @@ pub async fn wait_for_decision(
 ) -> Result<Decision> {
     let deadline = Duration::from_secs(timeout_secs);
 
-    let result = timeout(deadline, async {
+    let result: Result<Result<Decision, anyhow::Error>, _> = timeout(deadline, async {
         loop {
             let decision = check_decision(db, session_id)?;
             if let Some(d) = decision {

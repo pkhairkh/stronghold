@@ -32,7 +32,7 @@ pub async fn push_approval_request(
 /// Push an extend request.
 pub async fn push_extend_request(
     tenant_id: &str,
-    session_id: &str,
+    _session_id: &str,
     req: &crate::routes::agent::ExtendRequest,
 ) -> Result<()> {
     let topic = format!("{}-session-requested", tenant_id);
@@ -48,7 +48,7 @@ pub async fn push_extend_request(
 /// Push an anomaly alert.
 pub async fn push_anomaly(
     tenant_id: &str,
-    machine_id: &str,
+    _machine_id: &str,
     message: &str,
 ) -> Result<()> {
     let topic = format!("{}-session-anomaly", tenant_id);

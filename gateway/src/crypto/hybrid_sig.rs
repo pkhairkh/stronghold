@@ -4,6 +4,7 @@
 //! in the future, the other still proves authenticity.
 
 use anyhow::Result;
+use base64::Engine;
 use ed25519_dalek::{Signer, Verifier, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,7 +47,7 @@ impl AuditKeys {
     /// Load keys from a directory, or generate new ones if not present.
     pub fn load_or_generate_keys(dir: &str) -> Result<Self> {
         let secret_path = format!("{}/audit_ed25519.key", dir);
-        let pub_path = format!("{}/audit_ed25519.pub", dir);
+        let _pub_path = format!("{}/audit_ed25519.pub", dir);
 
         if std::path::Path::new(&secret_path).exists() {
             tracing::info!("Loading existing audit keys");

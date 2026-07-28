@@ -35,7 +35,7 @@ pub fn generate_containerfile(config: &ImageConfig) -> Result<String> {
     }
 
     // Toolchains
-    for (name, toolchain) in &config.toolchains {
+    for (_name, toolchain) in &config.toolchains {
         lines.push(String::new());
         match toolchain {
             crate::images::dsl::Toolchain::Rust { channel, date, targets, components } => {
