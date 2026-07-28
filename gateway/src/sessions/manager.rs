@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_scopes_default_config() {
-        let config = scopes::ScopeConfig::default();
+        let config = crate::sessions::scopes::ScopeConfig::default();
         assert_eq!(config.scopes.len(), 3);
         assert_eq!(config.scopes[0].name, "default");
         assert_eq!(config.scopes[1].name, "extended");
@@ -490,10 +490,10 @@ mod tests {
 
     #[test]
     fn test_matches_deceptive_pattern() {
-        let config = scopes::ScopeConfig::default();
-        assert!(scopes::matches_deceptive_pattern(&config, "rm -rf /").is_some());
-        assert!(scopes::matches_deceptive_pattern(&config, "git push --force").is_some());
-        assert!(scopes::matches_deceptive_pattern(&config, "ls -la").is_none());
+        let config = crate::sessions::scopes::ScopeConfig::default();
+        assert!(crate::sessions::scopes::matches_deceptive_pattern(&config, "rm -rf /").is_some());
+        assert!(crate::sessions::scopes::matches_deceptive_pattern(&config, "git push --force").is_some());
+        assert!(crate::sessions::scopes::matches_deceptive_pattern(&config, "ls -la").is_none());
     }
 }
 
