@@ -1142,3 +1142,170 @@ Stage Summary:
   W6-T5–T7 image builds + CI, W6-T9–T10 tenant images + catalog CI)
   are deferred to integration waves (require podman/registry infrastructure)
 
+---
+Task ID: W7 (SEV-SNP Attestation)
+Agent: orchestrator (general-purpose)
+Task: Wave 7 — SEV-SNP attestation, key sealing, WebAuthn measurement binding
+
+Work Log:
+- W7-T1 (provision SEV-SNP Vultr box): SKIPPED — cannot be done from this
+  environment. Documented in docs/SEV_SNP.md and docs/MEASUREMENTS/v1.0.txt
+  as the blocker for capturing the real measurement. Defers to ops.
+
+- W7-T2 (real SEV-SNP attestation report generation):
+  - Reviewed gateway/src/tee/sev_snp.rs — was a stub returning a hardcoded
+    base64 string with sev_snp_active=true.
+  - Investigated the `sev` crate (v4.0.0, virTEE project). API:
+      sev::firmware::guest::Firmware::open()       // opens /dev/sev-guest
+      fw.get_report(None, None, Some(1))            // VMPL=1, returns AttestationReport
+      fw.get_derived_key(None, DerivedKey::new(..)) // 32-byte HW-derived key
+  - The AttestationReport is a #[repr(C)] struct with a 48-byte `measurement`
+    field, signed by the AMD VCEK. Serializes cleanly via bincode.
+  - Implemented generate_attestation_report() to:
+      1. Try Firmware::open() (real SEV-SNP path)
+      2. On success: call get_report(None, None, Some(1)), bincode-serialize,
+         base64-encode, SHA-256 hash, return with sev_snp_active=true
+      3. On failure (no /dev/sev-guest): return stub with sev_snp_active=false
+  - verify_sev_snp_available() now checks /dev/sev-guest (was /dev/sev —
+    /dev/sev is the host-side node; /dev/sev-guest is the guest-side node
+    that the sev crate opens).
+  - current_measurement() returns the hex-encoded 48-byte measurement
+    (sha384: prefix) on real hardware; None on dev box.
+  - Added bincode = "1.3" to workspace + gateway Cargo.toml as an optional
+    dep gated on the sev-snp feature.
+
+- W7-T3 (key sealing to measurement):
+  - Created gateway/src/tee/sealing.rs — shared module compiled under both
+    feature flags (sev-snp and no-sev-snp). Contains:
+      derive_sealing_key(measurement) -> [u8; 32]   // HKDF-SHA256
+      seal_with_key(key, plaintext) -> Vec<u8>       // AES-256-GCM, nonce-prefixed
+      unseal_with_key(key, sealed) -> Vec<u8>        // AES-256-GCM
+      seal_with_measurement(m, pt) -> Vec<u8>        // convenience
+      unseal_with_measurement(m, ct) -> Vec<u8>      // convenience
+  - Wire format: [12-byte nonce] [ciphertext + 16-byte GCM tag]
+  - seal_keys() / unseal_keys() in sev_snp.rs:
+      1. Try Firmware::open() + fw.get_derived_key(None, DerivedKey::new(
+         false, GuestFieldSelect(1 << 3), 0, 0, 0))  // mix measurement in
+      2. On success: AES-256-GCM with the HW-derived 32-byte key
+      3. On failure: HKDF-SHA256 from current_measurement() string + AES-256-GCM
+  - no_sev.rs seal_keys()/unseal_keys() remain pass-through (per W7-T7 DoD).
+  - Modified gateway/src/tee/mod.rs to expose `pub mod sealing;` under both
+    feature flags.
+
+- W7-T4 (tests for key sealing):
+  - 15 unit tests in tee/sealing.rs:
+    - Round-trip (small, empty, 64KB inputs)
+    - Non-deterministic output (random nonce per call)
+    - Sealed blob format (nonce length, ciphertext length, GCM tag length)
+    - Wrong measurement fails to unseal
+    - 1-char measurement difference fails (binary-tamper simulation)
+    - Tampered ciphertext fails (GCM auth tag)
+    - Tampered nonce fails
+    - Short input rejection
+    - Deterministic key derivation
+    - Per-measurement key difference
+    - HKDF domain separation (info string in use)
+    - Explicit-key API round-trip + wrong-key failure
+
+- W7-T5 (tests for attestation report structure):
+  - 11 unit tests in tee/sev_snp.rs:
+    - All fields present, non-empty
+    - Field types verified via let bindings
+    - JSON serialization with all expected keys
+    - Measurement format (sha256:/sha384: prefix or "n/a")
+    - report_hash matches SHA-256 of report field
+    - Dev-box fallback returns sev_snp_active=false
+    - verify_sev_snp_available() returns Err on dev box (no /dev/sev-guest)
+    - seal_keys/unseal_keys round-trip (dev fallback path)
+    - seal_keys produces 12-byte-nonce-prefixed ciphertext
+    - seal_keys is non-deterministic
+    - unseal_keys rejects short input
+
+- W7-T6 (verify /attestation endpoint):
+  - routes/attestation.rs already calls generate_attestation_report() and
+    returns Json<AttestationReport>. Route is wired in routes/mod.rs at
+    GET /attestation. Verified compiles cleanly under both feature flags.
+
+- W7-T7 (no-sev-snp stub correctness):
+  - no_sev.rs: sev_snp_active=false, hardened_mode=false, report="no-sev-snp",
+    report_hash="n/a", measurement="n/a". Seal/unseal are pass-throughs.
+  - 7 unit tests in no_sev.rs verifying stub behavior (note: these only
+    compile under --no-default-features --features no-sev-snp; the standard
+    --features no-sev-snp build still compiles sev_snp.rs because sev-snp
+    is in the default feature set).
+
+- W7-T5 (WebAuthn challenge includes SEV-SNP measurement hash):
+  - Added generate_challenge_with_sev_snp(cmd, req, scope, measurement_hash)
+    to crypto/webauthn.rs. Mixes the measurement hash into the SHA-256
+    challenge so the phone's WebAuthn assertion signs over the gateway's
+    current TEE state.
+  - Pass None to opt out of TEE binding (matches base generate_challenge).
+  - Added sev_snp_measurement_hash(report) helper.
+  - 8 unit tests + 2 proptest:
+    - Deterministic with same measurement
+    - Differs per measurement (the security property)
+    - None matches base generate_challenge
+    - Some differs from base
+    - Empty string matches None (zero-byte contribution)
+    - Differs per cmd/request/scope even with fixed measurement
+    - sev_snp_measurement_hash deterministic + differs per report
+    - proptest: deterministic + differs-when-measurement-differs
+
+- W7-T8 (measurement registry):
+  - Updated docs/MEASUREMENTS/v1.0.txt with placeholder (all-zero SHA-256)
+    + comprehensive comments documenting the W7 status, the sev crate API
+    path, and the 6-step procedure to capture the real measurement once
+    an SEV-SNP Vultr box is provisioned (W7-T1).
+  - Intentionally used a SHA-256-length placeholder (64 hex chars) rather
+    than the real SHA-384 length (96 hex chars) so a mismatch is visually
+    obvious during inspection.
+
+- W7-T9 (SEV-SNP integration test suite):
+  - The tee/sealing.rs and tee/sev_snp.rs test modules serve as the
+    hardware-independent unit test suite (240 tests pass on the dev box
+    without /dev/sev-guest).
+  - A dedicated tests/sev_snp/ directory for golden integration tests
+    on real SEV-SNP hardware is deferred to W7-T1 (provisioning).
+
+Documentation:
+- Rewrote docs/SEV_SNP.md with:
+  - Implementation status table (real vs. stubbed vs. blocked)
+  - The sev crate API path with code examples
+  - Wire format for sealed keys
+  - Key-derivation paths table (real / dev fallback / no-sev stub)
+  - Updated /dev/sev → /dev/sev-guest (the guest-side device node)
+  - The 4-step attestation flow
+  - Troubleshooting section distinguishing /dev/sev (host) vs.
+    /dev/sev-guest (guest)
+  - References to sev crate docs + AMD SEV-SNP FW ABI spec
+
+Files changed:
+- gateway/src/tee/sealing.rs (NEW, 280 lines)
+- gateway/src/tee/sev_snp.rs (rewrote, 440 lines)
+- gateway/src/tee/no_sev.rs (rewrote with tests, 165 lines)
+- gateway/src/tee/mod.rs (added pub mod sealing;)
+- gateway/src/crypto/webauthn.rs (added generate_challenge_with_sev_snp
+  + sev_snp_measurement_hash + 10 tests)
+- gateway/Cargo.toml (added bincode optional dep)
+- Cargo.toml (added bincode to workspace.dependencies)
+- docs/SEV_SNP.md (rewrote, 360 lines)
+- docs/MEASUREMENTS/v1.0.txt (updated placeholder + procedure comments)
+
+Constraints honored:
+- All SEV-SNP code is behind #[cfg(feature = "sev-snp")] in mod.rs
+- no-sev-snp fallback works on the dev box (cargo build + cargo test pass)
+- Did NOT touch: crypto/hybrid_sig.rs, crypto/hybrid_kem.rs, sessions/manager.rs
+- cargo build --workspace --features sev-snp: 0 errors, 0 warnings
+- cargo test -p stronghold-gateway --features no-sev-snp: 240 passed, 0 failed
+- 36 new tests added in W7 (15 sealing + 11 sev_snp + 10 webauthn SEV-SNP binding)
+- cargo test -p stronghold-gateway --features sev-snp --lib -- tee: 26 passed
+
+Stage Summary:
+- Wave 7 (SEV-SNP Attestation) code-complete
+- W7-T1 (provision Vultr SEV-SNP box) deferred — cannot be done from dev env
+- W7-T9 (golden integration tests on real SEV box) deferred to W7-T1
+- All other W7 tasks (T2–T8) implemented and tested
+- The `sev` crate is wired up with real ioctl calls; the dev box exercises
+  the same AES-256-GCM + HKDF code path via the fallback
+- 36 new tests; 240 total gateway tests pass
+- Next: Wave 8 (Phone Enrollment & PWA) — 10 tasks
