@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, DeleteParams, ListParams, Meta};
+use kube::api::{Api, DeleteParams, ListParams};
 use kube::Client as KubeClient;
 use std::env;
 
@@ -174,7 +174,10 @@ pub async fn list_pods() -> Result<Vec<String>> {
     let client = get_kube_client().await?;
     let pods: Api<Pod> = Api::default_namespaced(client);
     let pod_list = pods.list(&ListParams::default()).await?;
-    Ok(pod_list.iter().filter_map(|p| Meta::name(p).to_string().into()).collect())
+    Ok(pod_list
+        .iter()
+        .filter_map(|p| p.metadata.name.clone())
+        .collect())
 }
 
 #[cfg(test)]
