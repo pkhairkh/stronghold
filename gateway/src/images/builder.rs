@@ -203,7 +203,7 @@ mod tests {
 
     /// Absolute path to the repo-root `images/` directory.
     fn catalog_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../images")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../images")
     }
 
     fn load_catalog(name: &str) -> ImageConfig {

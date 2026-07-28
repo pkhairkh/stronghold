@@ -125,9 +125,10 @@ mod tests {
     /// Tests resolve catalog `image.toml` files from here so they work
     /// regardless of the working directory `cargo test` is invoked from.
     /// `CARGO_MANIFEST_DIR` is the gateway package directory
-    /// (`<repo>/gateway/`), so `../../images` reaches the catalog.
+    /// (`<repo>/gateway/`), so `../images` reaches the catalog at
+    /// `<repo>/images/`.
     fn catalog_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../images")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../images")
     }
 
     fn load_catalog(name: &str) -> ImageConfig {
