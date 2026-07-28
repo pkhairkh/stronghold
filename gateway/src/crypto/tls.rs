@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use rustls::crypto::aws_lc_rs::default_provider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use std::sync::Arc;
 
