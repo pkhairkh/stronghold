@@ -1,0 +1,56 @@
+# ntfy server configuration — Stronghold control plane
+#
+# Per-tenant ACL'd topics, authentication required, attachments disabled,
+# per-IP rate limits to prevent abuse.
+#
+# This file is installed by setup/bootstrap.sh to /etc/ntfy/server.yml.
+# After changes: systemctl restart ntfy
+
+# --- Network ---
+base-url: "http://localhost:8090"
+listen-http: ":8090"
+# listen-https is intentionally unset; TLS terminates at the gateway or a
+# reverse proxy. Use Tailscale (setup/tailscale.sh) for encrypted transport
+# between worker ntfy and the gateway.
+behind-proxy: false
+
+# --- Storage ---
+cache-file: "/var/lib/ntfy/cache.db"
+cache-startup-queries:
+  - "PRAGMA journal_mode=WAL"
+  - "PRAGMA synchronous=NORMAL"
+cache-duration: "12h"
+attachment-cache-dir: "/var/lib/ntfy/attachments"
+
+# --- Authentication & Authorization ---
+# Auth is REQUIRED. Anonymous subscribe/publish is denied by default.
+enable-login: true
+enable-signup: false  # users are provisioned by the gateway, not self-served
+auth-default-access: "deny-all"
+
+# --- Topic attachments & limits ---
+# Attachments are DISABLED. Stronghold push messages are JSON blobs (a few
+# hundred bytes) carrying an order/resume/release decision. No file uploads.
+attachment-total-size-limit: "0"
+attachment-file-size-limit: "0"
+attachment-expiry-duration: "0s"
+
+# Message size & rate limits
+message-size-limit: "4096"           # 4 KB — plenty for JSON approvals
+global-topic-subscription-limit: 0   # unlimited (tenants are bounded by ACLs)
+visitor-subscription-limit: 16
+visitor-request-limit-burst: 16
+visitor-request-limit-replenish: "1s"
+visitor-request-limit-exceeded-host: "127.0.0.1"  # don't leak internal IPs
+visitor-message-daily-limit: 256
+visitor-email-limit-burst: 0          # email disabled
+visitor-email-limit-replenish: "0s"
+
+# Federation / web app
+enable-metrics: false  # enable here and expose via Prometheus separately if needed
+enable-reservations: false
+upstream-base-url: ""  # no federation — Stronghold is self-hosted
+
+# Logging
+log-level: "INFO"
+log-format: "text"

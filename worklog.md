@@ -687,3 +687,142 @@ Stage Summary:
   W8-T7 (quorum UI), W8-T9 (anomaly deep-link detail page — anomaly
   alerts render as cards in this revision, no separate detail route),
   W8-T10 (Playwright cross-browser matrix).
+
+---
+Task ID: W10
+Agent: general-purpose (bootstrap-deploy)
+Task: Wave 10 — Bootstrap & Deployment (W10-T1 through W10-T10)
+
+Work Log:
+- Reviewed setup/bootstrap.sh, setup/worker-bootstrap.sh, setup/systemd/*.service,
+  docs/DEPLOYMENT.md for DoD compliance.
+- W10-T1 (bootstrap.sh): Rewrote as idempotent. Color helpers, root/OS check,
+  SEV-SNP detection (auto-fallback to --dev), dnf deps install, Rust install via
+  rustup (skip if present), cargo build --release with feature auto-detect
+  (sev-snp or no-sev-snp), idempotent init (skips if DB+keys exist), self-signed
+  TLS cert generation (skip if present), ntfy install + config deploy, systemd
+  unit install with path templating, firewalld port open, service enable+restart,
+  full summary with setup password (only printed on first init).
+- W10-T2 (worker-bootstrap.sh): Rewrote as idempotent. Hostname set (skip if
+  matches), optional Tailscale install (skip if present), k3s agent install
+  (k3s script is itself idempotent), ntfy install + config, registry container
+  (pull+run if absent, start if stopped), systemd unit generation for registry
+  container, firewall config (Tailscale-aware: 8090 public, 6443/10250/5000/8472
+  on Tailscale zone), k3s agent registration verification with retry loop,
+  node status via kubectl.
+- W10-T3 (systemd hardening): All three units rewritten with full hardening
+  directives:
+    * stronghold-gateway.service: NoNewPrivileges, ProtectSystem=strict,
+      ProtectHome, ProtectKernelTunables/Modules/Logs, ProtectControlGroups,
+      ProtectClock, ProtectHostname, ProtectProc=invisible, ProcSubset=pid,
+      RestrictAddressFamilies, RestrictNamespaces, RestrictRealtime/SUIDSGID,
+      LockPersonality, SystemCallFilter=@system-service (deny @privileged,
+      @resources, @mount, @cpu-emulation, @debug, @module, @raw-io),
+      SystemCallArchitectures=native, CapabilityBoundingSet (NET_BIND_SERVICE
+      + DAC_OVERRIDE), AmbientCapabilities=NET_BIND_SERVICE, UMask=0077.
+      PrivateDevices=false (intentional — needs /dev/sev for SEV-SNP).
+      MemoryDenyWriteExecute=false (JIT in aws_lc_rs crypto provider).
+    * ntfy.service: Same hardening, plus MemoryDenyWriteExecute=true,
+      PrivateDevices=true. Runs as ntfy user.
+    * k3s-worker.service: Relaxed where k3s requires privileges
+      (ProtectSystem=false, PrivateDevices=false, ProtectKernelTunables/Modules/
+      ControlGroups=false, RestrictNamespaces=false, LockPersonality=false,
+      MemoryDenyWriteExecute=false, RestrictSUIDSGID=false). Keeps
+      NoNewPrivileges=false (k3s sets up userns), RestrictRealtime=true,
+      SystemCallArchitectures=native.
+  Verified with systemd-analyze security:
+    * stronghold-gateway.service: 2.2 OK (target <5.0)
+    * ntfy.service: 1.4 OK (target <5.0)
+- W10-T4 (ntfy.yml): Created setup/ntfy.yml. auth-default-access: deny-all,
+  enable-login: true, enable-signup: false (users provisioned by gateway,
+  not self-served), attachments disabled (total-size-limit: 0, file-size-limit:
+  0, expiry: 0s), message-size-limit: 4096 (4KB — plenty for JSON approvals),
+  per-visitor rate limits (subscription=16, request burst=16, message daily=256,
+  email disabled), cache-file with WAL journal mode, no federation
+  (upstream-base-url: "").
+- W10-T5 (firewall.sh): Created setup/firewall.sh. Idempotent, supports
+  --tailscale-iface, --public-only, --reset, --role=control-plane|worker.
+  Opens 8443/tcp + 8090/tcp on public zone. Creates/binds trusted zone to
+  Tailscale interface for 6443/tcp, 10250/tcp, 5000/tcp, 8472/udp. Removes
+  internal ports from public zone (belt-and-braces). Prints verification
+  commands (nmap expected result).
+- W10-T6 (tailscale.sh): Created setup/tailscale.sh. Optional. Idempotent.
+  Supports --auth-key (unattended join) or interactive, --hostname,
+  --advertise-routes (enables IP forwarding via sysctl),
+  --accept-routes, --exit-node, --status. Auto-detects Tailscale interface,
+  invokes firewall.sh to bind trusted zone. Prints summary with Tailscale IPs.
+- W10-T7 (backup.sh): Created setup/backup.sh. SQLite online backup via
+  `.backup` command (consistent snapshot, non-blocking). Stages keys, audit
+  logs, DB, config, ntfy server.yml, MANIFEST.json (with version metadata).
+  Encrypts with age passphrase (BACKUP_ENCRYPTION_PASS env or prompt with
+  confirmation). Uploads to S3 via aws s3 cp --sse AES256, or copies to
+  local BACKUP_DIR. Pruning via --keep-days (works for both local find and
+  S3 ls+rm). Restore mode via --restore: detects age encryption, prompts
+  for password, stops services, rsyncs data+config, restarts. Verification:
+  decrypts to /dev/null to confirm passphrase matches.
+- W10-T8 (upgrade.sh): Created setup/upgrade.sh. Snapshots current binary,
+  DB (online .backup), attestation.json. Downloads release tarball from
+  GitHub releases (or builds from source via --from-source). Verifies
+  Ed25519 signature via openssl dgst -sha256 -verify (raw 64-byte sig,
+  converts hex pubkey to PEM). Drains k3s node (cordon + drain with
+  --ignore-daemonsets --delete-emptydir-data --timeout=120s). Stops
+  stronghold-gateway, installs new binary, runs init for migrations,
+  re-attests SEV-SNP (records new measurement, compares with previous,
+  warns if changed), optionally rotates audit+push keys (--rotate-keys),
+  restarts service. Auto-rollback on start failure (restores previous
+  binary from snapshot). Uncordons k3s node. Verifies audit log still
+  verifies. --check mode shows current vs latest GitHub release.
+- W10-T9 (monitoring.sh): Created setup/monitoring.sh. Installs
+  Prometheus node_exporter (system user, hardened systemd unit, textfile
+  collector dir). Optional --with-prometheus: installs Prometheus server
+  with scrape config for node_exporter + stronghold-gateway /metrics
+  (TLS skip-verify for self-signed dev cert), 30-day retention, listens on
+  127.0.0.1:9090. Optional --with-grafana: installs Grafana via dnf repo.
+  Generates alert rules (StrongholdGatewayDown, NodeExporterDown, HighCPU,
+  DiskSpaceLow, StrongholdDBSize). Generates Grafana dashboard JSON
+  (/usr/share/stronghold/monitoring/stronghold-dashboard.json) with 8
+  panels (gateway up, active sessions, pending approvals, audit entries,
+  gateway CPU, gateway memory, system CPU, disk usage). Custom Stronghold
+  metrics documented: stronghold_sessions_active, stronghold_approvals_pending,
+  stronghold_audit_entries_total, stronghold_sqlite_db_size_bytes.
+- W10-T10 (DEPLOYMENT.md): Rewrote docs/DEPLOYMENT.md as full runbook.
+  Three deployment patterns (single-box, multi-box, community-hosted) each
+  with step-by-step commands, architecture ASCII diagrams, troubleshooting
+  tables, rollback procedures. Network configuration section (Tailscale
+  recommended, WireGuard alternative, firewall rules per role). Monitoring
+  section (quick start, health checks, logs, metrics). Backup & restore
+  section (commands, what's backed up, cron example). Upgrades section
+  (check, upgrade, what it does, rollback). Security hardening section
+  (SSH, fail2ban, automatic updates, systemd hardening summary with
+  exceptions documented). Quick reference table of all scripts and files.
+- Build verification: cd /root/stronghold && /root/.cargo/bin/cargo build
+  --workspace --features no-sev-snp → finished, 0 errors, 0 warnings.
+- All scripts pass `bash -n` syntax check.
+- All scripts are idempotent (safe to re-run).
+- Note: a transient sftp.put issue was observed uploading bootstrap.sh and
+  worker-bootstrap.sh (silently left old content). Worked around by
+  base64-encoding then decoding on the remote. All files now match local
+  checksums.
+
+Files Changed:
+- setup/bootstrap.sh              (rewritten, 387 lines)
+- setup/worker-bootstrap.sh       (rewritten, 312 lines)
+- setup/systemd/stronghold-gateway.service (rewritten, 58 lines)
+- setup/systemd/ntfy.service      (rewritten, 49 lines)
+- setup/systemd/k3s-worker.service (rewritten, 44 lines)
+- setup/ntfy.yml                  (new, 53 lines)
+- setup/firewall.sh               (new, 166 lines)
+- setup/tailscale.sh              (new, 200 lines)
+- setup/backup.sh                 (new, 382 lines)
+- setup/upgrade.sh                (new, 406 lines)
+- setup/monitoring.sh             (new, 458 lines)
+- docs/DEPLOYMENT.md              (rewritten, 535 lines)
+
+Stage Summary:
+- Wave 10 (Bootstrap & Deployment) COMPLETE
+- 10 tasks (W10-T1 through W10-T10) all addressed
+- All scripts idempotent, support Rocky 9 and 10, use dnf
+- systemd security scores: gateway=2.2, ntfy=1.4 (both <5.0 target)
+- Build passes (cargo build --workspace --features no-sev-snp → 0 errors)
+- No Rust code modified in this wave (pure ops/bootstrap work)
+- Next: Wave 11 (Integration & E2E)

@@ -43,12 +43,60 @@ pub const CHALLENGE_LEN: usize = 32;
 /// replay: an assertion signed for one approval cannot be reused for another.
 ///
 /// Returns 32 raw bytes. The caller base64url-encodes this for the browser.
+///
+/// **Note:** this function does *not* bind the challenge to the SEV-SNP
+/// measurement. For approvals that must be bound to the gateway's TEE state
+/// (the production path), use [`generate_challenge_with_sev_snp`] instead.
 pub fn generate_challenge(cmd_hash: &str, request_id: &str, scope_hash: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(cmd_hash.as_bytes());
     hasher.update(request_id.as_bytes());
     hasher.update(scope_hash.as_bytes());
     hasher.finalize().to_vec()
+}
+
+/// Generate a WebAuthn challenge bound to a session approval *and* the
+/// gateway's current SEV-SNP measurement hash (W7-T5).
+///
+/// The challenge is `sha256(cmd_hash || request_id || scope_hash ||
+/// sev_snp_measurement_hash)`. Binding the measurement into the challenge
+/// means the phone's WebAuthn assertion cryptographically signs over the
+/// gateway's current TEE state — so any future approval whose gateway
+/// measurement has changed (binary upgrade, kernel patch, compromise) will
+/// fail challenge verification on the gateway side, even if the rest of
+/// the assertion metadata matches.
+///
+/// Pass `None` for `sev_snp_measurement_hash` to opt out of TEE binding
+/// (dev mode, or `--features no-sev-snp` builds). When `None`, the
+/// resulting challenge is identical to [`generate_challenge`].
+///
+/// Returns 32 raw bytes.
+pub fn generate_challenge_with_sev_snp(
+    cmd_hash: &str,
+    request_id: &str,
+    scope_hash: &str,
+    sev_snp_measurement_hash: Option<&str>,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(cmd_hash.as_bytes());
+    hasher.update(request_id.as_bytes());
+    hasher.update(scope_hash.as_bytes());
+    if let Some(mh) = sev_snp_measurement_hash {
+        hasher.update(mh.as_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+/// Compute the SHA-256 hash of the SEV-SNP attestation report, hex-encoded.
+///
+/// Convenience wrapper used by callers that have an
+/// [`crate::tee::AttestationReport`] and want to bind its hash into a
+/// WebAuthn challenge via [`generate_challenge_with_sev_snp`].
+pub fn sev_snp_measurement_hash(report: &crate::tee::AttestationReport) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(report.measurement.as_bytes());
+    hasher.update(report.report_hash.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Generate a random challenge (for enrollment, where there's no command to bind to).
@@ -644,6 +692,123 @@ mod tests {
         assert!(!result.unwrap()); // rejected
     }
 
+    // --- W7-T5: SEV-SNP measurement binding in WebAuthn challenge ---
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_is_deterministic() {
+        let m = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let c1 = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(m));
+        let c2 = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(m));
+        assert_eq!(c1, c2);
+        assert_eq!(c1.len(), 32);
+    }
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_differs_per_measurement() {
+        // Different measurement → different challenge. This is the
+        // security property: if the gateway binary is modified (changing
+        // the launch measurement), the WebAuthn challenge also changes,
+        // so previously-issued assertions cannot be replayed.
+        let m1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        let m2 = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        let c1 = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(m1));
+        let c2 = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(m2));
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_none_matches_base() {
+        // When measurement is None, the SEV-SNP variant must behave
+        // identically to the base generate_challenge (no TEE binding).
+        // This is the dev-box fallback.
+        let base = generate_challenge("cmd", "req", "scope");
+        let with_none = generate_challenge_with_sev_snp("cmd", "req", "scope", None);
+        assert_eq!(base, with_none);
+    }
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_some_differs_from_base() {
+        // Binding a non-None measurement must change the challenge vs.
+        // the un-bound version.
+        let m = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+        let base = generate_challenge("cmd", "req", "scope");
+        let bound = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(m));
+        assert_ne!(base, bound);
+    }
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_empty_measurement_string() {
+        // An empty measurement string contributes zero bytes to the SHA-256
+        // input, so it must yield the same challenge as `None`. This is
+        // the correct behavior — the `Some("")` case is a degenerate input
+        // and shouldn't pretend to bind anything.
+        let base = generate_challenge("cmd", "req", "scope");
+        let empty = generate_challenge_with_sev_snp("cmd", "req", "scope", Some(""));
+        assert_eq!(base, empty);
+
+        // But a non-empty measurement must differ from the empty/None case.
+        let non_empty =
+            generate_challenge_with_sev_snp("cmd", "req", "scope", Some("sha256:abc"));
+        assert_ne!(empty, non_empty);
+    }
+
+    #[test]
+    fn test_generate_challenge_with_sev_snp_differs_per_cmd_request_scope() {
+        // The base triple (cmd/request/scope) still has the same binding
+        // effect — different triples yield different challenges even
+        // when the measurement is fixed.
+        let m = "sha256:fixed-measurement";
+        let c1 = generate_challenge_with_sev_snp("cmd1", "req", "scope", Some(m));
+        let c2 = generate_challenge_with_sev_snp("cmd2", "req", "scope", Some(m));
+        assert_ne!(c1, c2);
+
+        let c3 = generate_challenge_with_sev_snp("cmd", "req1", "scope", Some(m));
+        let c4 = generate_challenge_with_sev_snp("cmd", "req2", "scope", Some(m));
+        assert_ne!(c3, c4);
+
+        let c5 = generate_challenge_with_sev_snp("cmd", "req", "scope1", Some(m));
+        let c6 = generate_challenge_with_sev_snp("cmd", "req", "scope2", Some(m));
+        assert_ne!(c5, c6);
+    }
+
+    #[test]
+    fn test_sev_snp_measurement_hash_is_deterministic() {
+        let report = crate::tee::AttestationReport {
+            report: "report-bytes".to_string(),
+            report_hash: "abc123".to_string(),
+            measurement: "sha256:deadbeef".to_string(),
+            sev_snp_active: true,
+            hardened_mode: true,
+            generated_at: "2026-07-29T00:00:00Z".to_string(),
+        };
+        let h1 = sev_snp_measurement_hash(&report);
+        let h2 = sev_snp_measurement_hash(&report);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64); // SHA-256 hex
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sev_snp_measurement_hash_differs_per_report() {
+        let r1 = crate::tee::AttestationReport {
+            report: "r1".to_string(),
+            report_hash: "h1".to_string(),
+            measurement: "sha256:m1".to_string(),
+            sev_snp_active: true,
+            hardened_mode: true,
+            generated_at: "2026-07-29T00:00:00Z".to_string(),
+        };
+        let r2 = crate::tee::AttestationReport {
+            report: "r2".to_string(),
+            report_hash: "h2".to_string(),
+            measurement: "sha256:m2".to_string(),
+            sev_snp_active: true,
+            hardened_mode: true,
+            generated_at: "2026-07-29T00:00:00Z".to_string(),
+        };
+        assert_ne!(sev_snp_measurement_hash(&r1), sev_snp_measurement_hash(&r2));
+    }
+
     // --- Property tests ---
 
     use proptest::prelude::*;
@@ -668,6 +833,42 @@ mod tests {
             let c1 = generate_random_challenge();
             let c2 = generate_random_challenge();
             prop_assert_ne!(c1, c2);
+        }
+
+        #[test]
+        fn proptest_challenge_with_sev_snp_deterministic(
+            cmd_hash in proptest::prelude::any::<String>(),
+            request_id in proptest::prelude::any::<String>(),
+            scope_hash in proptest::prelude::any::<String>(),
+            measurement in proptest::prelude::any::<String>()
+        ) {
+            let c1 = generate_challenge_with_sev_snp(
+                &cmd_hash, &request_id, &scope_hash, Some(&measurement)
+            );
+            let c2 = generate_challenge_with_sev_snp(
+                &cmd_hash, &request_id, &scope_hash, Some(&measurement)
+            );
+            prop_assert_eq!(&c1, &c2);
+            prop_assert_eq!(c1.len(), 32);
+        }
+
+        #[test]
+        fn proptest_challenge_with_sev_snp_differs_when_measurement_differs(
+            cmd_hash in proptest::prelude::any::<String>(),
+            request_id in proptest::prelude::any::<String>(),
+            scope_hash in proptest::prelude::any::<String>(),
+            m1 in proptest::prelude::any::<String>(),
+            m2 in proptest::prelude::any::<String>()
+        ) {
+            if m1 != m2 {
+                let c1 = generate_challenge_with_sev_snp(
+                    &cmd_hash, &request_id, &scope_hash, Some(&m1)
+                );
+                let c2 = generate_challenge_with_sev_snp(
+                    &cmd_hash, &request_id, &scope_hash, Some(&m2)
+                );
+                prop_assert_ne!(&c1, &c2);
+            }
         }
     }
 }

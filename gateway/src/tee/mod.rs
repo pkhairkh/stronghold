@@ -9,6 +9,18 @@
 //! - Integrity protection (hypervisor cannot modify memory without detection)
 //! - Attestation (phone can verify gateway runs on genuine SEV-SNP hardware)
 //! - Launch measurement binding (audit keys sealed to measurement)
+//!
+//! ## Module layout
+//!
+//! - [`sealing`] — HKDF + AES-GCM key-sealing primitives, compiled under
+//!   both feature flags. Used by both the real SEV-SNP path and the dev
+//!   fallback. Tested on the dev box (no hardware required).
+//! - `sev_snp` — real SEV-SNP attestation + key sealing (uses the `sev`
+//!   crate; falls back to a stub report when `/dev/sev-guest` is absent).
+//! - `no_sev` — non-TEE stub. `sev_snp_active: false`, seal/unseal are
+//!   pass-throughs.
+
+pub mod sealing;
 
 #[cfg(feature = "sev-snp")]
 pub mod sev_snp;

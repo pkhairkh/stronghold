@@ -1,5 +1,6 @@
 [Unit]
 Description=ntfy Push Notification Server
+Documentation=https://docs.ntfy.sh/
 After=network-online.target
 Wants=network-online.target
 
@@ -11,8 +12,12 @@ ExecStart=/usr/bin/ntfy serve
 Environment=NTFY_CONFIG=/etc/ntfy/server.yml
 Restart=always
 RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+LimitNOFILE=4096
+LimitNPROC=512
 
-# Security hardening
+# --- Security hardening ---
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -21,13 +26,24 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @cpu-emulation @debug @module @raw-io
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

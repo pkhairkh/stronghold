@@ -1,7 +1,9 @@
 [Unit]
 Description=Stronghold Gateway Control Plane
+Documentation=https://github.com/pkhairkh/stronghold/blob/main/docs/DEPLOYMENT.md
 After=network-online.target ntfy.service
 Wants=network-online.target
+Requires=ntfy.service
 
 [Service]
 Type=simple
@@ -12,27 +14,45 @@ Environment=STRONGHOLD_DATA_DIR=/var/lib/stronghold
 Environment=STRONGHOLD_CONFIG=/etc/stronghold/config.toml
 Environment=STRONGHOLD_NTFY_URL=http://localhost:8090
 Environment=RUST_LOG=stronghold_gateway=info,tower_http=info
+Environment=RUST_BACKTRACE=1
 Restart=always
 RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
 LimitNOFILE=65536
 LimitNPROC=65536
+LimitCORE=0
 
-# Security hardening
+# --- Security hardening ---
+# Note: gateway needs /dev/sev for SEV-SNP attestation, so PrivateDevices
+# must be false. This is intentional and audited.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/stronghold /etc/stronghold
 PrivateTmp=true
-PrivateDevices=false  # needs /dev/sev for SEV-SNP
+PrivateDevices=false  # needs /dev/sev for SEV-SNP attestation
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
-LockPersonality=true
-MemoryDenyWriteExecute=false  # JIT needed by some crypto libs
 RestrictRealtime=true
 RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false  # JIT needed by some crypto libs (aws_lc_rs)
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @cpu-emulation @debug @module @raw-io
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# Allow binding to 8443 without root (if user is changed to non-root)
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

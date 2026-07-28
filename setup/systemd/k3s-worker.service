@@ -1,15 +1,44 @@
 [Unit]
-Description=k3s Worker Node
+Description=k3s Worker Node (Stronghold)
+Documentation=https://docs.k3s.io/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
+User=root
+Group=root
 ExecStart=/usr/local/bin/k3s agent
 Environment=K3S_URL=https://{{CONTROL_PLANE_IP}}:6443
 Environment=K3S_TOKEN={{K3S_TOKEN}}
 Restart=always
 RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=60
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=0
+
+# --- Security hardening ---
+# k3s agent needs broad privileges to manage containers, networking, and cgroups.
+# We keep the most important directives but relax others required by k3s.
+NoNewPrivileges=false  # k3s needs to set up userns for pods
+ProtectSystem=false    # k3s writes to /etc/cni, /var/lib/cni, /var/lib/rancher
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false   # k3s needs /dev access for container device passthrough
+ProtectKernelTunables=false  # k3s configures networking
+ProtectKernelModules=false   # k3s loads overlay, br_netfilter
+ProtectControlGroups=false   # k3s manages cgroups
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=false
+LockPersonality=false
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+RestrictSUIDSGID=false  # container images may need setuid binaries
+SystemCallFilter=@system-service @privileged
+SystemCallArchitectures=native
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
