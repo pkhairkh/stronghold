@@ -539,7 +539,10 @@ mod tests {
         let rp_id_hash = {
             let mut hasher = Sha256::new();
             hasher.update(DEFAULT_RP_ID.as_bytes());
-            hasher.finalize().into()
+            let result = hasher.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&result);
+            arr
         };
         let mut auth_bytes = Vec::new();
         auth_bytes.extend_from_slice(&rp_id_hash);
@@ -580,7 +583,10 @@ mod tests {
         let rp_id_hash = {
             let mut hasher = Sha256::new();
             hasher.update(DEFAULT_RP_ID.as_bytes());
-            hasher.finalize().into()
+            let result = hasher.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&result);
+            arr
         };
         let mut auth_bytes = Vec::new();
         auth_bytes.extend_from_slice(&rp_id_hash);
