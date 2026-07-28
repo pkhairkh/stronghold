@@ -42,7 +42,7 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
 
     for (seq, ts, machine_id, event, payload, entry_prev_hash, hash, sig_ed, sig_mldsa, sev_hash) in &entries {
         // Check hash chain
-        if entry_prev_hash != prev_hash {
+        if *entry_prev_hash != prev_hash {
             errors.push(format!("seq {}: hash chain broken (expected {}, got {})", seq, prev_hash, entry_prev_hash));
         }
 
@@ -52,7 +52,7 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
         hasher.update(message.as_bytes());
         let computed_hash = hex::encode(hasher.finalize());
 
-        if computed_hash != hash {
+        if computed_hash != *hash {
             errors.push(format!("seq {}: hash mismatch (expected {}, got {})", seq, hash, computed_hash));
         }
 
@@ -60,7 +60,7 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
         // TODO: verify ML-DSA-65 signature
         // TODO: verify SEV-SNP attestation report (if present)
 
-        prev_hash = hash;
+        prev_hash = hash.clone();
         let _ = (sig_ed, sig_mldsa, sev_hash);
     }
 
