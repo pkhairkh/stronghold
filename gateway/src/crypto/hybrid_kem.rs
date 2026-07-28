@@ -93,13 +93,12 @@ impl PushKeys {
     /// - X25519: uses `OsRng` (platform CSPRNG).
     /// - ML-KEM-768: uses `OsRng` via the `ml_kem` crate's `KemCore::generate()`.
     pub fn generate() -> Self {
-        let mut rng = rand::rngs::OsRng;
-
-        // X25519
-        let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+        // X25519 — random_from_rng accepts impl RngCore by value (OsRng is Copy).
+        let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let x25519_public = x25519_dalek::PublicKey::from(&x25519_secret);
 
-        // ML-KEM-768
+        // ML-KEM-768 — KemCore::generate takes &mut impl CryptoRngCore.
+        let mut rng = rand::rngs::OsRng;
         let (dk, ek) = MlKem768::generate(&mut rng);
         let mlkem_secret = dk.as_bytes().to_vec();
         let mlkem_public = ek.as_bytes().to_vec();
@@ -243,8 +242,6 @@ pub fn encapsulate(
     phone_x25519_pub: &[u8],
     phone_mlkem_pub: &[u8],
 ) -> Result<(EncapsulatedSecret, [u8; AES_KEY_LEN])> {
-    let mut rng = rand::rngs::OsRng;
-
     // --- X25519 ---
     if phone_x25519_pub.len() != X25519_PUBLIC_LEN {
         return Err(anyhow::anyhow!(
@@ -257,7 +254,7 @@ pub fn encapsulate(
     pub_arr.copy_from_slice(phone_x25519_pub);
     let phone_x_pub = x25519_dalek::PublicKey::from(pub_arr);
 
-    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
     let x25519_shared = ephemeral_secret.diffie_hellman(&phone_x_pub);
     let x25519_shared_bytes = x25519_shared.to_bytes();
@@ -275,6 +272,7 @@ pub fn encapsulate(
     let ek_encoded: &Encoded<EncapsulationKey<MlKem768Params>> =
         <&Encoded<EncapsulationKey<MlKem768Params>>>::from(&ek_arr);
     let ek = EncapsulationKey::<MlKem768Params>::from_bytes(ek_encoded);
+    let mut rng = rand::rngs::OsRng;
     let (ct, mlkem_shared) = ek
         .encapsulate(&mut rng)
         .map_err(|e| anyhow::anyhow!("ml-kem encapsulate failed: {:?}", e))?;
