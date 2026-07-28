@@ -7,7 +7,7 @@ pub async fn push(image: &str, registry: &str) -> Result<String> {
     tracing::info!(image = image, registry = registry, "Pushing image (stub)");
 
     // TODO: use oci-distribution crate to push
-    let digest = format!("sha256:{}", hex::encode(&[0u8; 32]));
+    let digest = format!("sha256:{}", hex::encode([0u8; 32]));
     Ok(digest)
 }
 
@@ -16,7 +16,7 @@ pub async fn pull(image: &str) -> Result<String> {
     tracing::info!(image = image, "Pulling image (stub)");
 
     // TODO: use oci-distribution crate to pull
-    let digest = format!("sha256:{}", hex::encode(&[0u8; 32]));
+    let digest = format!("sha256:{}", hex::encode([0u8; 32]));
     Ok(digest)
 }
 

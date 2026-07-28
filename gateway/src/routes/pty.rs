@@ -121,9 +121,7 @@ async fn audit_stream(socket: WebSocket, machine_id: String, _state: AppState) {
     let (mut ws_sender, mut _ws_receiver) = socket.split();
 
     // TODO: subscribe to audit events for this machine_id and stream to client
-    while let Err(_e) = ws_sender.send(Message::Text(
+    let _ = ws_sender.send(Message::Text(
         "Audit stream not yet implemented".to_string()
-    )).await {
-        break;
-    }
+    )).await;
 }

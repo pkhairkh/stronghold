@@ -18,7 +18,7 @@ pub async fn schedule(
 ) -> Result<ScheduledMachine> {
     // Check tenant quota
     let can_schedule = crate::tenants::quotas::check_capacity(
-        &state.db,
+        state,
         tenant_id,
         req.compute.cpu.unwrap_or(4),
         req.compute.memory_gb.unwrap_or(8),

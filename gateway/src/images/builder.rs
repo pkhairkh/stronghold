@@ -132,6 +132,6 @@ pub async fn build(config: &ImageConfig, tag: &str) -> Result<String> {
     tracing::debug!("Generated Containerfile:\n{}", containerfile);
 
     // Return the image digest (stub)
-    let digest = format!("sha256:{}", hex::encode(&[0u8; 32]));
+    let digest = format!("sha256:{}", hex::encode([0u8; 32]));
     Ok(digest)
 }
