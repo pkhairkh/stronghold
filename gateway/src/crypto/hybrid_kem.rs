@@ -272,9 +272,10 @@ pub fn encapsulate(
     }
     let mut ek_arr = [0u8; MLKEM_PUB_LEN];
     ek_arr.copy_from_slice(phone_mlkem_pub);
-    // Use from_slice to get an &Encoded<_> reference.
+    // Use TryFrom to get an &Encoded<_> reference (from_slice is deprecated).
     let ek_encoded: &Encoded<EncapsulationKey<MlKem768Params>> =
-        Encoded::<EncapsulationKey<MlKem768Params>>::from_slice(&ek_arr);
+        <&Encoded<EncapsulationKey<MlKem768Params>>>::try_from(&ek_arr)
+            .expect("ek_arr is the correct size");
     let ek = EncapsulationKey::<MlKem768Params>::from_bytes(ek_encoded);
     let (ct, mlkem_shared) = ek
         .encapsulate(&mut rng)
@@ -339,7 +340,8 @@ pub fn decapsulate(
     let mut dk_arr = [0u8; MLKEM_SECRET_LEN];
     dk_arr.copy_from_slice(&keys.mlkem_secret);
     let dk_encoded: &Encoded<DecapsulationKey<MlKem768Params>> =
-        Encoded::<DecapsulationKey<MlKem768Params>>::from_slice(&dk_arr);
+        <&Encoded<DecapsulationKey<MlKem768Params>>>::try_from(&dk_arr)
+            .expect("dk_arr is the correct size");
     let dk = DecapsulationKey::<MlKem768Params>::from_bytes(dk_encoded);
 
     let mlkem_shared = dk
@@ -452,6 +454,7 @@ fn write_public_file(path: &str, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // --- W1-T4: PushKeys keypair generation + save/load ---
 
