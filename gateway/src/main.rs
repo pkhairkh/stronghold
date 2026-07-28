@@ -123,8 +123,8 @@ async fn serve(bind_addr: &str) -> Result<()> {
     tracing::info!("Database initialized");
 
     // Generate/load keys
-    let audit_keys = crypto::hybrid_sig::load_or_generate_keys("/var/lib/stronghold/keys/")?;
-    let push_keys = crypto::hybrid_kem::load_or_generate_keys("/var/lib/stronghold/keys/")?;
+    let audit_keys = crypto::hybrid_sig::AuditKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
+    let push_keys = crypto::hybrid_kem::PushKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
     tracing::info!("Cryptographic keys loaded");
 
     // Build the axum router
