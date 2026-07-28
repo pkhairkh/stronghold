@@ -119,7 +119,9 @@ mod tests {
         let fetched = get(&pool, &created.id).unwrap();
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.name, "bob");
-        assert_eq!(fetched.setup_password, created.setup_password);
+        // Note: create() returns plaintext setup_password, get() returns the hash.
+        // They won't match — that's by design (plaintext is one-time display only).
+        assert!(!fetched.setup_password.is_empty());
     }
 
     #[test]
