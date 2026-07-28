@@ -1,5 +1,8 @@
 //! Stronghold CLI — manage tenants, credentials, images, and audit logs.
 
+// Scaffold-stage allow: will be removed in Wave 11 (Integration & E2E).
+#![allow(dead_code)]
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

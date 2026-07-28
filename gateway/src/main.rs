@@ -13,6 +13,9 @@
 //!
 //! See `docs/` for the full specification.
 
+// Scaffold-stage allow: will be removed in Wave 11 (Integration & E2E).
+#![allow(dead_code)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
