@@ -204,8 +204,7 @@ mod tests {
 
     fn load_catalog(name: &str) -> ImageConfig {
         let path = catalog_dir().join(name).join("image.toml");
-        load(path.to_str().unwrap())
-            .expect(&format!("catalog image '{}' should parse", name))
+        load(path.to_str().unwrap()).expect(&format!("catalog image '{}' should parse", name))
     }
 
     /// True if the Containerfile contains a line starting with the given
@@ -326,7 +325,9 @@ mod tests {
 
         // pre_install commands appear (wasmtime installer)
         assert!(cf.contains("RUN"));
-        assert!(cf.contains("curl -sSfL https://wasmtime.dev/install.sh | bash -s -- --version 47.0"));
+        assert!(
+            cf.contains("curl -sSfL https://wasmtime.dev/install.sh | bash -s -- --version 47.0")
+        );
 
         // ENV directives: 4 user-defined + 2 toolchain PATHs = 6
         let envs = lines_starting_with(&cf, "ENV ");
@@ -385,7 +386,9 @@ mod tests {
             cf
         );
         assert!(
-            cf.contains("ENV PATH=\"/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin\""),
+            cf.contains(
+                "ENV PATH=\"/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin\""
+            ),
             "expected {{path}} substitution in PATH, got: {}",
             cf
         );
@@ -403,11 +406,15 @@ mod tests {
 
         // Go toolchain
         assert!(cf.contains("# Toolchain: go (1.22.2)"));
-        assert!(cf.contains("RUN curl -fsSL https://go.dev/dl/go1.22.2.linux-amd64.tar.gz | tar -C /usr/local -xz"));
+        assert!(cf.contains(
+            "RUN curl -fsSL https://go.dev/dl/go1.22.2.linux-amd64.tar.gz | tar -C /usr/local -xz"
+        ));
         assert!(cf.contains("ENV PATH=\"/usr/local/go/bin:${PATH}\""));
 
         // pre_install (curl go tarball) — appears as RUN block
-        assert!(cf.contains("curl -fsSL https://go.dev/dl/go1.22.2.linux-amd64.tar.gz | tar -C /usr/local -xz"));
+        assert!(cf.contains(
+            "curl -fsSL https://go.dev/dl/go1.22.2.linux-amd64.tar.gz | tar -C /usr/local -xz"
+        ));
 
         // ENV: {home} substituted in GOPATH and GOBIN
         assert!(
@@ -688,7 +695,10 @@ snippets = ["RUN echo STEP_INJECT"]
         assert!(from_idx < label_idx, "LABEL must come after FROM");
         assert!(label_idx < pre_idx, "pre_install must come after LABEL");
         assert!(pre_idx < dnf_idx, "packages must come after pre_install");
-        assert!(dnf_idx < toolchain_idx, "toolchains must come after packages");
+        assert!(
+            dnf_idx < toolchain_idx,
+            "toolchains must come after packages"
+        );
         assert!(toolchain_idx < env_idx, "ENV must come after toolchains");
         assert!(env_idx < post_idx, "post_install must come after ENV");
         assert!(post_idx < inject_idx, "inject must come after post_install");
@@ -729,9 +739,9 @@ EXTRA_PATH = "/opt/bin:{path}"
 "#;
         let cfg = crate::images::dsl::parse(toml).expect("parse should succeed");
         let cf = generate_containerfile(&cfg).expect("generate should succeed");
-        assert!(cf.contains(
-            "ENV EXTRA_PATH=\"/opt/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin\""
-        ));
+        assert!(
+            cf.contains("ENV EXTRA_PATH=\"/opt/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin\"")
+        );
     }
 
     #[test]
@@ -777,9 +787,9 @@ EXTRA_PATH = "{path}:/extra"
         // PATH env line is emitted verbatim (the override)
         assert!(cf.contains("ENV PATH=\"/custom/bin\""));
         // {path} placeholder uses the default rocky-base PATH, not the override
-        assert!(cf.contains(
-            "ENV EXTRA_PATH=\"/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/extra\""
-        ));
+        assert!(
+            cf.contains("ENV EXTRA_PATH=\"/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/extra\"")
+        );
     }
 
     #[test]
@@ -820,7 +830,8 @@ X = "{home}:{home}:{path}:{path}"
         let cf = generate_containerfile(&cfg).expect("generate should succeed");
         let expected = format!(
             "ENV X=\"{}:{}:{}:{}\"",
-            "/home/dev", "/home/dev",
+            "/home/dev",
+            "/home/dev",
             "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
             "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin"
         );

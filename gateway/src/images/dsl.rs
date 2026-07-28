@@ -214,9 +214,9 @@ where
                     // here explicitly.
                     _ => {
                         return Err(serde::de::Error::custom(format!(
-                            "unknown toolchain '{}' (expected one of: rust, node, python, go, elan)",
-                            key
-                        )))
+                        "unknown toolchain '{}' (expected one of: rust, node, python, go, elan)",
+                        key
+                    )))
                     }
                 };
                 out.insert(key, toolchain);
@@ -692,7 +692,10 @@ extends = ""
 description = "Non-root image with empty extends"
 "#;
         let result = parse(toml);
-        assert!(result.is_err(), "empty extends for non-root should be rejected");
+        assert!(
+            result.is_err(),
+            "empty extends for non-root should be rejected"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("rocky-base") || err.contains("stronghold"),
@@ -712,7 +715,11 @@ description = "Image extending a non-Stronghold image"
         let result = parse(toml);
         assert!(result.is_err(), "invalid extends should be rejected");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("ubuntu"), "error should name the bad value, got: {}", err);
+        assert!(
+            err.contains("ubuntu"),
+            "error should name the bad value, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -721,7 +728,7 @@ description = "Image extending a non-Stronghold image"
         let bad_inputs = [
             "this is not toml at all {{{}}",
             "[unclosed section",
-            "name = ",                              // value missing
+            "name = ",                                 // value missing
             "name = \"ok\"\nextends = \"rocky-base\n", // unterminated string
             "= nope",
             "[[array]]\ninvalid",

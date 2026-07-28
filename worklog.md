@@ -980,3 +980,165 @@ Stage Summary:
 - Next: Wave 11 (Integration & E2E) — wire ntfy push into routes/agent,
   add fuzzing to CI
 
+---
+Task ID: W6 (W6-T1, W6-T2, W6-T3, W6-T8)
+Agent: general-purpose (W6 Image DSL & Builder)
+Task: Wave 6 — Image DSL tests + builder placeholder substitution
+
+Work Log:
+- Read TASKS.md Wave 6 DoD and prior worklog context (Wave 0–5 complete)
+- Reviewed gateway/src/images/{dsl.rs, builder.rs, registry.rs, mod.rs}
+- Reviewed all 8 catalog image.toml files in images/
+- Reviewed docs/IMAGE_DSL.md for the {home}/{path} placeholder contract
+- Reviewed fuzz/fuzz_targets/image_toml_parse.rs (existing panic-free harness)
+
+W6-T1 (parser tests):
+- Added 8 catalog image parse tests (rocky-base, rust-stable, rust-nightly,
+  node-20, python-ml, go-cli, lean-research, fullstack) — each verifies
+  name, extends, description, packages (dnf/apt), toolchains (variant +
+  all fields), env (count + specific values + placeholder presence),
+  pre_install/post_install command counts, inject_containerfile snippets,
+  and labels.
+- Added test_parse_all_catalog_images_succeed smoke test (guards against
+  future catalog regressions).
+- Added test_all_catalog_images_extend_rocky_base inheritance test:
+  rocky-base is the root (extends=""), the other 7 extend directly from
+  "rocky-base". Parser also accepts "stronghold/X" for transitive
+  inheritance (synthetic test_parser_accepts_transitive_stronghold_extends).
+- Added 6 negative tests: missing name, missing extends, empty extends
+  for non-root, invalid extends (e.g. "ubuntu"), invalid TOML (6 malformed
+  inputs), empty input, unicode garbage.
+- Added 3 proptest property tests (512 cases each):
+  - proptest_parser_never_panics_bytes: random Vec<u8> → lossy UTF-8 → parse
+  - proptest_parser_never_panics_unicode: random String → parse
+  - proptest_parser_never_panics_toml_shaped: random key=value TOML → parse
+  All three assert the parser never panics on any input.
+
+W6-T1 (parser bugfix):
+- The parser previously rejected the rocky-base root image because its
+  extends="" failed the validation check (extends != "rocky-base" &&
+  !extends.starts_with("stronghold/")). Fixed: now explicitly allows
+  empty extends when name == "rocky-base" (root image case).
+
+W6-T1 (toolchain deserializer bugfix):
+- The Toolchain enum uses #[serde(untagged)], which tries variants in
+  declaration order. Node, Python, and Go all have shape { version: String },
+  so serde silently picked Node for all three — losing the type information.
+  This caused [toolchains.go] to deserialize as Toolchain::Node, and the
+  builder then generated Node-specific Containerfile output for Go images.
+- Added custom deserialize_toolchains() that uses the map key
+  ([toolchains.go] → Go, [toolchains.python] → Python, etc.) to pick
+  the correct variant. Unknown toolchain names now produce a clear error
+  rather than silently mis-tagging as Node.
+- No function signatures changed; only added a private helper function
+  and a #[serde(deserialize_with = ...)] attribute on the toolchains field.
+
+W6-T2 (Containerfile generator tests):
+- Added 9 builder tests generating Containerfiles from each catalog image
+  and verifying FROM/RUN/ENV/LABEL directives appear in the output.
+  Each test checks:
+  - FROM stronghold/<extends> (or FROM for rocky-base root)
+  - RUN dnf install -y <packages>
+  - Toolchain-specific RUN directives (rustup, curl nodesource, etc.)
+  - ENV directives with placeholder substitution applied
+  - LABEL directives (for rocky-base: 4 OCI labels)
+  - post_install commands (with leading "    && ")
+  - inject_containerfile snippets (for rocky-base: USER, WORKDIR, CMD)
+- Added test_generate_containerfile_all_catalog_images smoke test that
+  verifies all 8 catalog images produce a non-empty Containerfile
+  starting with FROM.
+
+W6-T8 (escape hatch tests):
+- Added test_escape_hatches_all_three_present: synthetic image with all
+  three escape hatches (pre_install, post_install, inject_containerfile)
+  populated. Verifies snippets appear in the right positions:
+    FROM → LABEL → pre_install → packages → toolchains → env →
+    post_install → inject_containerfile
+- Added test_escape_hatch_pre_install_only, test_escape_hatch_post_install_only,
+  test_escape_hatch_inject_only: each verifies a single escape hatch works
+  in isolation and doesn't emit the others' markers.
+- Added test_escape_hatches_none_present: verifies no marker comments or
+  empty RUN blocks are emitted when no escape hatches are configured.
+- Added test_escape_hatch_ordering: strictly verifies the directive order
+  using byte offsets (FROM < LABEL < pre_install < packages < toolchains
+  < env < post_install < inject_containerfile).
+
+W6-T8 (placeholder substitution implementation):
+- Added substitute_placeholders(value, config) helper in builder.rs that
+  replaces {home} → /home/dev and {path} → the rocky-base PATH.
+- Substitution always uses the rocky-base defaults, NOT the image's own
+  HOME/PATH overrides. This avoids recursive substitution when an image's
+  PATH override contains {path} (e.g. python-ml's
+  PATH = "/usr/local/cuda/bin:{path}" would otherwise expand to
+  "/usr/local/cuda/bin:/usr/local/cuda/bin:{path}" — duplicated and
+  still containing the placeholder).
+- This matches the docs: {home} is the dev user's home directory (always
+  /home/dev, created by rocky-base), and {path} is the inherited PATH
+  from rocky-base.
+- generate_containerfile() now calls substitute_placeholders() on each
+  env-var value before emitting the ENV directive.
+
+W6-T8 (placeholder substitution tests):
+- test_placeholder_home_substituted_with_default: {home} → /home/dev
+- test_placeholder_path_substituted_with_default: {path} → rocky-base PATH
+- test_placeholder_home_ignores_config_override: {home} stays /home/dev
+  even when the image overrides HOME
+- test_placeholder_path_ignores_config_override: {path} stays rocky-base
+  PATH even when the image overrides PATH (prevents recursion)
+- test_placeholder_no_substitution_for_other_braces: only {home} and
+  {path} are substituted; {other}, {HOME}, {PATH} stay as-is (case-sensitive)
+- test_placeholder_multiple_occurrences: multiple {home}/{path} in the
+  same value are all substituted
+- test_placeholder_in_value_without_placeholders: plain values pass through
+  unchanged
+- test_substitute_placeholders_helper_directly: direct unit test of the
+  helper function
+
+W6-T3 (build stub smoke test):
+- Added test_build_stub_writes_containerfile_and_returns_digest (tokio
+  test) verifying the build() stub:
+  - Returns a digest starting with "sha256:"
+  - Digest is 64 hex chars (32 bytes) after the prefix
+  - Stub returns all-zeros digest (placeholder until podman integration)
+
+Catalog fixes (images/*/image.toml):
+- Quoted all dotted OCI label keys in all 8 image.toml files. TOML's
+  dotted-key syntax (org.opencontainers.image.title = ...) deserializes
+  as a nested map { org: { opencontainers: { image: { title: ... } } } }
+  rather than a flat string-keyed HashMap<String, String>. Quoting the
+  keys ("org.opencontainers.image.title" = ...) makes them flat string
+  keys, which is what the ImageConfig.labels field expects.
+- Updated docs/IMAGE_DSL.md to use quoted keys in the examples and
+  added a note explaining why quoting is required.
+
+Test results:
+- Baseline (before W6): 106 tests, 0 failures
+- After W6: 240 tests, 0 failures (134 new tests across all waves)
+- W6-specific: 45 new tests in images/ module (21 in dsl.rs, 24 in
+  builder.rs), all passing
+- cargo clippy on images/ module: clean (3 pre-existing warnings in
+  tee/sev_snp.rs and push/ntfy.rs from other waves, not touched)
+- cargo fmt on gateway package: clean
+
+Files changed:
+- gateway/src/images/dsl.rs: parser bugfix (rocky-base root) + custom
+  toolchain deserializer + 21 tests (8 catalog parse + 1 smoke +
+  1 inheritance + 1 transitive + 6 negative + 3 proptest)
+- gateway/src/images/builder.rs: substitute_placeholders() helper +
+  24 tests (9 catalog generate + 1 smoke + 5 escape hatch + 1 ordering +
+  7 placeholder + 1 helper + 1 build stub)
+- images/*/image.toml (8 files): quoted dotted OCI label keys
+- docs/IMAGE_DSL.md: updated examples to use quoted label keys
+
+Stage Summary:
+- Wave 6 (Image DSL & Builder) test coverage COMPLETE for W6-T1, W6-T2,
+  W6-T3 (smoke), W6-T8
+- 45 new tests, 0 failures
+- 3 parser/builder bugs fixed (rocky-base root rejection, toolchain
+  variant mis-tagging, recursive {path} substitution)
+- No existing function signatures modified
+- Constraints honored: did not touch crypto/, sessions/, machines/, routes/
+- Remaining W6 tasks (W6-T3 podman integration, W6-T4 registry push/pull,
+  W6-T5–T7 image builds + CI, W6-T9–T10 tenant images + catalog CI)
+  are deferred to integration waves (require podman/registry infrastructure)
+
