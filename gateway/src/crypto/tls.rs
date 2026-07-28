@@ -56,7 +56,7 @@ pub fn build_self_signed_server_config() -> Result<(ServerConfig, Vec<u8>)> {
     let pkcs8 = key_pair
         .private_key_to_pkcs8()
         .map_err(|e| anyhow::anyhow!("PKCS#8 export failed: {:?}", e))?;
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8));
+    let key_der = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8));
 
     // Build a minimal self-signed certificate.
     // Note: For a real self-signed cert we'd use rcgen or aws_lc_rs's cert
@@ -156,7 +156,7 @@ mod tests {
     fn test_build_server_config_rejects_empty_cert_chain() {
         // An empty cert chain should produce an error (not a panic).
         let cert_chain: Vec<CertificateDer<'static>> = vec![];
-        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(vec![]));
+        let key_der = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(vec![]));
         let result = build_server_config(cert_chain, key_der);
         assert!(result.is_err(), "empty cert chain should error");
     }
