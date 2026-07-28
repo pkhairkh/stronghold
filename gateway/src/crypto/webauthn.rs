@@ -657,7 +657,7 @@ mod tests {
         ) {
             let c1 = generate_challenge(&cmd_hash, &request_id, &scope_hash);
             let c2 = generate_challenge(&cmd_hash, &request_id, &scope_hash);
-            prop_assert_eq!(c1, c2);
+            prop_assert_eq!(&c1, &c2);
             prop_assert_eq!(c1.len(), 32);
         }
 
