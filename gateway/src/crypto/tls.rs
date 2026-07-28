@@ -30,6 +30,8 @@ pub fn build_server_config(
     // Use the aws_lc_rs provider with prefer-post-quantum (set via feature flag).
     let provider = Arc::new(default_provider());
     let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("selecting TLS protocol versions")?
         .with_no_client_auth()
         .with_single_cert(cert_chain, key_der)
         .context("failed to build TLS server config")?;
@@ -107,6 +109,8 @@ pub fn build_server_config_from_files(keys_dir: &str) -> Result<ServerConfig> {
 pub fn build_client_config() -> Result<rustls::ClientConfig> {
     let provider = Arc::new(default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("selecting TLS protocol versions")?
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
     Ok(config)
@@ -126,6 +130,8 @@ pub fn build_client_config_with_pinned_cert(
         .context("adding pinned cert to root store")?;
 
     let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("selecting TLS protocol versions")?
         .with_root_certificates(root_store)
         .with_no_client_auth();
     Ok(config)
