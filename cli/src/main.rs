@@ -181,18 +181,18 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Tenant { action } => handle_tenant(action, &cli).await,
-        Commands::Credentials { action } => handle_credentials(action, &cli).await,
-        Commands::AgentToken { action } => handle_agent_token(action, &cli).await,
-        Commands::Image { action } => handle_image(action, &cli).await,
-        Commands::Worker { action } => handle_worker(action, &cli).await,
-        Commands::Audit { action } => handle_audit(action, &cli).await,
-        Commands::Keys { action } => handle_keys(action, &cli).await,
+        Commands::Tenant { ref action } => handle_tenant(action, &cli).await,
+        Commands::Credentials { ref action } => handle_credentials(action, &cli).await,
+        Commands::AgentToken { ref action } => handle_agent_token(action, &cli).await,
+        Commands::Image { ref action } => handle_image(action, &cli).await,
+        Commands::Worker { ref action } => handle_worker(action, &cli).await,
+        Commands::Audit { ref action } => handle_audit(action, &cli).await,
+        Commands::Keys { ref action } => handle_keys(action, &cli).await,
         Commands::Init { data_dir } => handle_init(&data_dir).await,
     }
 }
 
-async fn handle_tenant(action: TenantCommands, cli: &Cli) -> anyhow::Result<()> {
+async fn handle_tenant(action: &TenantCommands, cli: &Cli) -> anyhow::Result<()> {
     match action {
         TenantCommands::Create { name } => {
             println!("Creating tenant: {}", name);
@@ -210,7 +210,7 @@ async fn handle_tenant(action: TenantCommands, cli: &Cli) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn handle_credentials(action: CredentialCommands, cli: &Cli) -> anyhow::Result<()> {
+async fn handle_credentials(action: &CredentialCommands, cli: &Cli) -> anyhow::Result<()> {
     match action {
         CredentialCommands::Enroll => {
             println!("Open this URL in your phone browser to enroll:");
@@ -226,7 +226,7 @@ async fn handle_credentials(action: CredentialCommands, cli: &Cli) -> anyhow::Re
     Ok(())
 }
 
-async fn handle_agent_token(action: AgentTokenCommands, cli: &Cli) -> anyhow::Result<()> {
+async fn handle_agent_token(action: &AgentTokenCommands, cli: &Cli) -> anyhow::Result<()> {
     match action {
         AgentTokenCommands::Mint { tenant, scope, ttl } => {
             println!("Minting agent token for tenant {} (scope={}, ttl={}s)", tenant, scope, ttl);
@@ -244,7 +244,7 @@ async fn handle_agent_token(action: AgentTokenCommands, cli: &Cli) -> anyhow::Re
     Ok(())
 }
 
-async fn handle_image(action: ImageCommands, _cli: &Cli) -> anyhow::Result<()> {
+async fn handle_image(action: &ImageCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         ImageCommands::Build { path, tag } => {
             println!("Building image from {} (stub)", path);
@@ -270,7 +270,7 @@ async fn handle_image(action: ImageCommands, _cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_worker(action: WorkerCommands, _cli: &Cli) -> anyhow::Result<()> {
+async fn handle_worker(action: &WorkerCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         WorkerCommands::Add { host, token: _ } => {
             println!("Adding worker {} (stub)", host);
@@ -284,7 +284,7 @@ async fn handle_worker(action: WorkerCommands, _cli: &Cli) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn handle_audit(action: AuditCommands, _cli: &Cli) -> anyhow::Result<()> {
+async fn handle_audit(action: &AuditCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         AuditCommands::Verify { tenant } => {
             println!("Verifying audit log for tenant {} (stub)", tenant);
@@ -303,7 +303,7 @@ async fn handle_audit(action: AuditCommands, _cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_keys(action: KeyCommands, _cli: &Cli) -> anyhow::Result<()> {
+async fn handle_keys(action: &KeyCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         KeyCommands::RotateAudit => {
             println!("Rotating audit keys (stub)");

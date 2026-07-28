@@ -29,9 +29,13 @@ serde_json = "1.0"
 toml = "0.8"
 
 # TLS (post-quantum hybrid)
-rustls = { version = "0.23", features = ["ring", "pqc-kyber"] }
+# Note: rustls 0.23 dropped the `pqc-kyber` feature. PQ key exchange
+# (X25519Kyber768Draft00) is now provided via the `aws_lc_rs` crypto
+# provider, which has Kyber built in. See ADR-0004 for the rationale.
+rustls = { version = "0.23", features = ["ring", "aws_lc_rs"] }
 rustls-pemfile = "2.1"
 tokio-rustls = "0.26"
+rustls-post-quantum = "0.2"
 
 # WebAuthn
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
