@@ -27,7 +27,7 @@ pub fn export(opts: &ExportOptions) -> Result<String> {
     let mut query = String::from(
         "SELECT ts, machine_id, event, payload, hash
          FROM audit_entries
-         WHERE tenant_id = ?1"
+         WHERE tenant_id = ?1",
     );
     let mut params: Vec<String> = vec![opts.tenant_id.clone()];
 
@@ -49,7 +49,13 @@ pub fn export(opts: &ExportOptions) -> Result<String> {
     let mut stmt = conn.prepare(&query)?;
     let rows: Vec<(String, String, String, String, String)> = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -71,7 +77,11 @@ pub fn export(opts: &ExportOptions) -> Result<String> {
             for (ts, machine, event, payload, hash) in rows {
                 output.push_str(&format!(
                     "[{}] machine={} event={} hash={}\n  payload={}\n\n",
-                    ts, machine, event, &hash[..16], payload
+                    ts,
+                    machine,
+                    event,
+                    &hash[..16],
+                    payload
                 ));
             }
             Ok(output)

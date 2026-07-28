@@ -8,12 +8,12 @@
 //! - `GET /agent/:machine_id/pty` — WebSocket PTY (bidirectional)
 //! - `GET /agent/:machine_id/audit` — WebSocket audit stream (read-only)
 
+use crate::routes::AppState;
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
     Path, State,
 };
 use futures_util::{SinkExt, StreamExt};
-use crate::routes::AppState;
 
 /// Handle a WebSocket PTY connection.
 ///
@@ -53,9 +53,9 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, state: AppState) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(machine = %machine_id, error = %e, "Failed to open PTY");
-            let _ = ws_sender.send(Message::Text(
-                format!("Error: failed to open PTY: {}", e)
-            )).await;
+            let _ = ws_sender
+                .send(Message::Text(format!("Error: failed to open PTY: {}", e)))
+                .await;
             return;
         }
     };
@@ -121,7 +121,9 @@ async fn audit_stream(socket: WebSocket, machine_id: String, _state: AppState) {
     let (mut ws_sender, mut _ws_receiver) = socket.split();
 
     // TODO: subscribe to audit events for this machine_id and stream to client
-    let _ = ws_sender.send(Message::Text(
-        "Audit stream not yet implemented".to_string()
-    )).await;
+    let _ = ws_sender
+        .send(Message::Text(
+            "Audit stream not yet implemented".to_string(),
+        ))
+        .await;
 }

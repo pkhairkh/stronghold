@@ -44,10 +44,7 @@ pub fn set(
 }
 
 /// Get quotas for a tenant.
-pub fn get(
-    db: &Pool<SqliteConnectionManager>,
-    tenant_id: &str,
-) -> Result<Quota> {
+pub fn get(db: &Pool<SqliteConnectionManager>, tenant_id: &str) -> Result<Quota> {
     let conn = db.get()?;
     let q = conn.query_row(
         "SELECT tenant_id, max_concurrent_machines, max_cpu_per_machine,

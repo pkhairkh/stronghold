@@ -13,10 +13,7 @@ pub struct Tenant {
 }
 
 /// Create a new tenant.
-pub fn create(
-    db: &Pool<SqliteConnectionManager>,
-    name: &str,
-) -> Result<Tenant> {
+pub fn create(db: &Pool<SqliteConnectionManager>, name: &str) -> Result<Tenant> {
     let id = format!("tenant_{}", ulid::Ulid::new());
     let created_at = chrono::Utc::now().to_rfc3339();
     let setup_password = generate_setup_password();
@@ -29,18 +26,19 @@ pub fn create(
 
     tracing::info!(tenant_id = %id, name = name, "Tenant created");
 
-    Ok(Tenant { id, name: name.to_string(), created_at, setup_password })
+    Ok(Tenant {
+        id,
+        name: name.to_string(),
+        created_at,
+        setup_password,
+    })
 }
 
 /// Get a tenant by ID.
-pub fn get(
-    db: &Pool<SqliteConnectionManager>,
-    id: &str,
-) -> Result<Tenant> {
+pub fn get(db: &Pool<SqliteConnectionManager>, id: &str) -> Result<Tenant> {
     let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, created_at, setup_password FROM tenants WHERE id = ?1"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, name, created_at, setup_password FROM tenants WHERE id = ?1")?;
 
     let tenant = stmt.query_row(params![id], |row| {
         Ok(Tenant {
@@ -57,19 +55,19 @@ pub fn get(
 /// List all tenants.
 pub fn list(db: &Pool<SqliteConnectionManager>) -> Result<Vec<Tenant>> {
     let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, created_at, setup_password FROM tenants ORDER BY created_at"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at, setup_password FROM tenants ORDER BY created_at")?;
 
-    let tenants = stmt.query_map([], |row| {
-        Ok(Tenant {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            created_at: row.get(2)?,
-            setup_password: row.get(3)?,
-        })
-    })?
-    .collect::<rusqlite::Result<Vec<_>>>()?;
+    let tenants = stmt
+        .query_map([], |row| {
+            Ok(Tenant {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                setup_password: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(tenants)
 }
@@ -79,5 +77,7 @@ fn generate_setup_password() -> String {
     let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         .chars()
         .collect();
-    (0..32).map(|_| chars[rand::thread_rng().gen_range(0..chars.len())]).collect()
+    (0..32)
+        .map(|_| chars[rand::thread_rng().gen_range(0..chars.len())])
+        .collect()
 }

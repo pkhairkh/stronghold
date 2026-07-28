@@ -10,10 +10,10 @@
 //! session TTLs are short (hours), so a quantum adversary breaking
 //! WebAuthn in 10 years gets nothing useful.
 
+use crate::routes::phone::WebAuthnAssertion;
 use anyhow::Result;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use crate::routes::phone::WebAuthnAssertion;
 
 /// Verify a WebAuthn assertion.
 ///

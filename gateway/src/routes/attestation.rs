@@ -4,10 +4,10 @@
 //! the gateway is running on genuine SEV-SNP hardware before approving
 //! any session.
 
+use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use crate::routes::AppState;
 
 /// Get the current SEV-SNP attestation report.
 ///

@@ -45,13 +45,11 @@ impl AnomalyScanner {
             .patterns
             .into_iter()
             .filter_map(|p| {
-                Regex::new(&p.pattern)
-                    .ok()
-                    .map(|regex| AnomalyPattern {
-                        regex,
-                        message: p.message,
-                        push: p.push,
-                    })
+                Regex::new(&p.pattern).ok().map(|regex| AnomalyPattern {
+                    regex,
+                    message: p.message,
+                    push: p.push,
+                })
             })
             .collect();
 

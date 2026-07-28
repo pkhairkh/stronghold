@@ -46,11 +46,7 @@ pub async fn push_extend_request(
 }
 
 /// Push an anomaly alert.
-pub async fn push_anomaly(
-    tenant_id: &str,
-    _machine_id: &str,
-    message: &str,
-) -> Result<()> {
+pub async fn push_anomaly(tenant_id: &str, _machine_id: &str, message: &str) -> Result<()> {
     let topic = format!("{}-session-anomaly", tenant_id);
     let title = "Stronghold: Anomaly Detected";
 
@@ -58,10 +54,7 @@ pub async fn push_anomaly(
 }
 
 /// Push a session-revoked confirmation.
-pub async fn push_revoked(
-    tenant_id: &str,
-    machine_id: &str,
-) -> Result<()> {
+pub async fn push_revoked(tenant_id: &str, machine_id: &str) -> Result<()> {
     let topic = format!("{}-session-active", tenant_id);
     let title = "Stronghold: Session Revoked";
     let message = format!("Machine {} has been revoked", machine_id);

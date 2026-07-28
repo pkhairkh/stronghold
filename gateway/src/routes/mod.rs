@@ -7,17 +7,17 @@
 //! - `pty` — WebSocket PTY proxy
 //! - `attestation` — SEV-SNP attestation report endpoint
 
-pub mod agent;
-pub mod phone;
 pub mod admin;
-pub mod pty;
+pub mod agent;
 pub mod attestation;
+pub mod phone;
+pub mod pty;
 
+use crate::crypto::hybrid_kem::PushKeys;
+use crate::crypto::hybrid_sig::AuditKeys;
 use axum::Router;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use crate::crypto::hybrid_sig::AuditKeys;
-use crate::crypto::hybrid_kem::PushKeys;
 
 /// Shared application state passed to all route handlers.
 #[derive(Clone)]
@@ -47,8 +47,14 @@ pub fn build_router(
         .route("/agent/extend", axum::routing::post(agent::extend))
         .route("/agent/health", axum::routing::get(agent::health))
         // WebSocket PTY
-        .route("/agent/:machine_id/pty", axum::routing::get(pty::handle_pty_ws))
-        .route("/agent/:machine_id/audit", axum::routing::get(pty::handle_audit_ws))
+        .route(
+            "/agent/:machine_id/pty",
+            axum::routing::get(pty::handle_pty_ws),
+        )
+        .route(
+            "/agent/:machine_id/audit",
+            axum::routing::get(pty::handle_audit_ws),
+        )
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))

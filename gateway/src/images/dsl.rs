@@ -2,8 +2,8 @@
 //!
 //! All images must `extends` from `stronghold/rocky-base`.
 
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageConfig {

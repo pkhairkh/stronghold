@@ -13,9 +13,9 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct AttestationReport {
-    pub report: String,           // base64-encoded attestation report
-    pub report_hash: String,      // SHA-256 of the report
-    pub measurement: String,      // launch measurement (hash of binary + kernel + initrd)
+    pub report: String,      // base64-encoded attestation report
+    pub report_hash: String, // SHA-256 of the report
+    pub measurement: String, // launch measurement (hash of binary + kernel + initrd)
     pub sev_snp_active: bool,
     pub hardened_mode: bool,
     pub generated_at: String,

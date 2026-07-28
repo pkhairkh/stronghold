@@ -17,46 +17,41 @@ use sha2::{Digest, Sha256};
 use crate::routes::phone::EnrollRequest;
 
 /// Verify an agent token and return the associated tenant_id.
-pub fn verify_agent_token(
-    db: &Pool<SqliteConnectionManager>,
-    token: &str,
-) -> Result<String> {
+pub fn verify_agent_token(db: &Pool<SqliteConnectionManager>, token: &str) -> Result<String> {
     let token_hash = hash_token(token);
     let conn = db.get()?;
-    let tenant_id: String = conn.query_row(
-        "SELECT tenant_id FROM agent_tokens
+    let tenant_id: String = conn
+        .query_row(
+            "SELECT tenant_id FROM agent_tokens
          WHERE token_hash = ?1
            AND (expires_at IS NULL OR expires_at > datetime('now'))
            AND revoked_at IS NULL",
-        params![token_hash],
-        |row| row.get(0),
-    ).map_err(|e| anyhow::anyhow!("Invalid or expired agent token: {}", e))?;
+            params![token_hash],
+            |row| row.get(0),
+        )
+        .map_err(|e| anyhow::anyhow!("Invalid or expired agent token: {}", e))?;
 
     Ok(tenant_id)
 }
 
 /// Verify a phone token and return the associated tenant_id.
-pub fn verify_phone_token(
-    db: &Pool<SqliteConnectionManager>,
-    token: &str,
-) -> Result<String> {
+pub fn verify_phone_token(db: &Pool<SqliteConnectionManager>, token: &str) -> Result<String> {
     let token_hash = hash_token(token);
     let conn = db.get()?;
-    let tenant_id: String = conn.query_row(
-        "SELECT tenant_id FROM phone_tokens
+    let tenant_id: String = conn
+        .query_row(
+            "SELECT tenant_id FROM phone_tokens
          WHERE token_hash = ?1 AND revoked_at IS NULL",
-        params![token_hash],
-        |row| row.get(0),
-    ).map_err(|e| anyhow::anyhow!("Invalid phone token: {}", e))?;
+            params![token_hash],
+            |row| row.get(0),
+        )
+        .map_err(|e| anyhow::anyhow!("Invalid phone token: {}", e))?;
 
     Ok(tenant_id)
 }
 
 /// Verify the one-time setup password.
-pub fn verify_setup_password(
-    db: &Pool<SqliteConnectionManager>,
-    password: &str,
-) -> Result<()> {
+pub fn verify_setup_password(db: &Pool<SqliteConnectionManager>, password: &str) -> Result<()> {
     let password_hash = hash_token(password);
     let conn = db.get()?;
     let exists: i64 = conn.query_row(

@@ -6,10 +6,10 @@
 //! using @noble/post-quantum). The public halves are uploaded to the gateway.
 //! Each push: gateway encapsulates with both → derives AES key → encrypts payload.
 
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::Result;
 use base64::Engine;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use aes_gcm::aead::Aead;
 
 /// Encrypt a push payload using the phone's hybrid public keys.
 pub fn encrypt(
@@ -18,10 +18,8 @@ pub fn encrypt(
     phone_mlkem_pub: &[u8],
 ) -> Result<EncryptedPayload> {
     // Encapsulate shared secret
-    let (encapsulated, shared_secret) = crate::crypto::hybrid_kem::encapsulate(
-        phone_x25519_pub,
-        phone_mlkem_pub,
-    )?;
+    let (encapsulated, shared_secret) =
+        crate::crypto::hybrid_kem::encapsulate(phone_x25519_pub, phone_mlkem_pub)?;
 
     // Derive AES key
     let aes_key = crate::crypto::hybrid_kem::derive_aes_key(&shared_secret, b"stronghold-push-v1");
@@ -33,7 +31,8 @@ pub fn encrypt(
     // Encrypt
     let cipher = Aes256Gcm::new_from_slice(&aes_key)
         .map_err(|e| anyhow::anyhow!("aes-gcm key init: {:?}", e))?;
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("aes-gcm encrypt: {:?}", e))?;
 
     Ok(EncryptedPayload {

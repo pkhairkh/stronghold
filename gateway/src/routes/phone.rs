@@ -11,12 +11,12 @@
 //! - `POST /phone/decide` — Submit a WebAuthn assertion (approve/deny)
 //! - `POST /phone/revoke` — Revoke an active session
 
+use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Sse};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use crate::routes::AppState;
 
 /// Serve the one-time enrollment page (HTML + JS).
 pub async fn setup_page() -> impl IntoResponse {
@@ -70,7 +70,12 @@ pub async fn enroll(
 pub async fn pending_sse(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, (StatusCode, String)> {
+) -> Result<
+    Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, String),
+> {
     let phone_token = extract_phone_token(&headers)?;
     let tenant_id = crate::tenants::auth::verify_phone_token(&state.db, &phone_token)
         .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
@@ -115,11 +120,18 @@ pub async fn decide(
 
     // Verify WebAuthn assertion
     let verified = crate::crypto::webauthn::verify_assertion(
-        &state.db, &tenant_id, &req.assertion, &req.request_id,
-    ).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+        &state.db,
+        &tenant_id,
+        &req.assertion,
+        &req.request_id,
+    )
+    .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
 
     if !verified {
-        return Err((StatusCode::UNAUTHORIZED, "WebAuthn assertion verification failed".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "WebAuthn assertion verification failed".to_string(),
+        ));
     }
 
     match req.decision.as_str() {
@@ -169,10 +181,16 @@ fn extract_phone_token(headers: &axum::http::HeaderMap) -> Result<String, (Statu
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing Authorization header".to_string(),
+        ))?;
 
     if !auth.starts_with("Bearer ") {
-        return Err((StatusCode::UNAUTHORIZED, "Expected Bearer token".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Expected Bearer token".to_string(),
+        ));
     }
 
     Ok(auth[7..].to_string())

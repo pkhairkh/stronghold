@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use base64::Engine;
-use ed25519_dalek::{Signer, Verifier, SigningKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 pub struct AuditKeys {
     pub ed25519_secret: SigningKey,
     pub ed25519_public: ed25519_dalek::VerifyingKey,
-    pub mldsa_secret: Vec<u8>,   // TODO: use ml_dsa::SigningKey
-    pub mldsa_public: Vec<u8>,   // TODO: use ml_dsa::VerifyingKey
+    pub mldsa_secret: Vec<u8>, // TODO: use ml_dsa::SigningKey
+    pub mldsa_public: Vec<u8>, // TODO: use ml_dsa::VerifyingKey
 }
 
 /// A dual signature (Ed25519 + ML-DSA-65).
@@ -88,7 +88,8 @@ impl AuditKeys {
     /// Verify a dual signature.
     pub fn verify(&self, message: &[u8], sig: &DualSignature) -> bool {
         // Ed25519
-        let ed_sig_bytes = match base64::engine::general_purpose::STANDARD.decode(&sig.sig_ed25519) {
+        let ed_sig_bytes = match base64::engine::general_purpose::STANDARD.decode(&sig.sig_ed25519)
+        {
             Ok(b) => b,
             Err(_) => return false,
         };

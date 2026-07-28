@@ -7,7 +7,7 @@ use rusqlite::params;
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::routes::agent::{OrderRequest, OrderResponse, ExtendRequest};
+use crate::routes::agent::{ExtendRequest, OrderRequest, OrderResponse};
 use crate::routes::AppState;
 
 /// Error types for session operations.
@@ -94,10 +94,7 @@ fn check_decision(
 }
 
 /// Mark a session as approved (called after WebAuthn verification).
-pub fn approve_session(
-    db: &Pool<SqliteConnectionManager>,
-    session_id: &str,
-) -> Result<()> {
+pub fn approve_session(db: &Pool<SqliteConnectionManager>, session_id: &str) -> Result<()> {
     let conn = db.get()?;
     conn.execute(
         "UPDATE pending_sessions SET status = 'approved', decided_at = datetime('now') WHERE id = ?1",
@@ -107,10 +104,7 @@ pub fn approve_session(
 }
 
 /// Mark a session as denied.
-pub fn deny_session(
-    db: &Pool<SqliteConnectionManager>,
-    session_id: &str,
-) -> Result<()> {
+pub fn deny_session(db: &Pool<SqliteConnectionManager>, session_id: &str) -> Result<()> {
     let conn = db.get()?;
     conn.execute(
         "UPDATE pending_sessions SET status = 'denied', decided_at = datetime('now') WHERE id = ?1",
@@ -127,9 +121,7 @@ pub async fn finalize_session(
     req: &OrderRequest,
 ) -> Result<OrderResponse> {
     // Schedule the pod on a worker
-    let machine = crate::machines::scheduler::schedule(
-        state, tenant_id, req,
-    ).await?;
+    let machine = crate::machines::scheduler::schedule(state, tenant_id, req).await?;
 
     // Generate connect token
     let connect_token = format!("stronghold_sess_{}", ulid::Ulid::new());
@@ -154,7 +146,10 @@ pub async fn finalize_session(
 
     // Log to audit
     crate::audit::log::entry(
-        &state.db, tenant_id, &machine.id, "session_started",
+        &state.db,
+        tenant_id,
+        &machine.id,
+        "session_started",
         serde_json::json!({
             "session_id": session_id,
             "image": req.image,
@@ -186,21 +181,31 @@ pub fn resume_session(
 ) -> Result<OrderResponse> {
     let conn = state.db.get()?;
 
-    let machine: (String, String, String, String, String) = conn.query_row(
-        "SELECT id, image, worker, expires_at,
+    let machine: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT id, image, worker, expires_at,
                 CASE WHEN worker_sev_snp = 1 THEN 'true' ELSE 'false' END
          FROM machines
          WHERE id = ?1 AND tenant_id = ?2 AND status = 'active'",
-        params![machine_id, tenant_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => SessionError::NotFound.into(),
-        _ => anyhow::Error::from(SessionError::from(e)),
-    })?;
+            params![machine_id, tenant_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => SessionError::NotFound.into(),
+            _ => anyhow::Error::from(SessionError::from(e)),
+        })?;
 
     // Check expiry
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&machine.3)
-        .map_err(|_| SessionError::Expired)?;
+    let expires_at =
+        chrono::DateTime::parse_from_rfc3339(&machine.3).map_err(|_| SessionError::Expired)?;
     if chrono::Utc::now() > expires_at.with_timezone(&chrono::Utc) {
         return Err(SessionError::Expired.into());
     }
@@ -219,11 +224,7 @@ pub fn resume_session(
 }
 
 /// Release (kill) a session early.
-pub async fn release_session(
-    state: &AppState,
-    tenant_id: &str,
-    machine_id: &str,
-) -> Result<()> {
+pub async fn release_session(state: &AppState, tenant_id: &str, machine_id: &str) -> Result<()> {
     // Kill the pod
     crate::machines::scheduler::kill_pod(state, machine_id).await?;
 
@@ -237,7 +238,10 @@ pub async fn release_session(
 
     // Audit log
     crate::audit::log::entry(
-        &state.db, tenant_id, machine_id, "session_released",
+        &state.db,
+        tenant_id,
+        machine_id,
+        "session_released",
         serde_json::json!({"reason": "agent_released"}),
         &state.audit_keys,
     )?;
@@ -246,11 +250,7 @@ pub async fn release_session(
 }
 
 /// Revoke a session (instant kill, from phone).
-pub async fn revoke_session(
-    state: &AppState,
-    tenant_id: &str,
-    machine_id: &str,
-) -> Result<()> {
+pub async fn revoke_session(state: &AppState, tenant_id: &str, machine_id: &str) -> Result<()> {
     // Kill the pod
     crate::machines::scheduler::kill_pod(state, machine_id).await?;
 
@@ -264,7 +264,10 @@ pub async fn revoke_session(
 
     // Audit log
     crate::audit::log::entry(
-        &state.db, tenant_id, machine_id, "session_revoked",
+        &state.db,
+        tenant_id,
+        machine_id,
+        "session_revoked",
         serde_json::json!({"reason": "phone_revoked"}),
         &state.audit_keys,
     )?;
@@ -308,7 +311,10 @@ pub async fn finalize_extend(
 
     // Audit log
     crate::audit::log::entry(
-        &state.db, tenant_id, &req.machine_id, "session_extended",
+        &state.db,
+        tenant_id,
+        &req.machine_id,
+        "session_extended",
         serde_json::json!({
             "session_id": session_id,
             "additional_secs": req.additional_secs,
@@ -324,7 +330,8 @@ pub async fn finalize_extend(
 pub fn pending_approval_stream(
     _db: &Pool<SqliteConnectionManager>,
     _tenant_id: &str,
-) -> impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>> {
+) -> impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
+{
     // TODO: implement proper SSE stream pulling from pending_sessions table
     async_stream::stream! {
         // Placeholder: send a heartbeat every 30s

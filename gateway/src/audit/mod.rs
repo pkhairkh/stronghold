@@ -8,6 +8,6 @@
 //! - Stored in per-tenant SQLite database
 //! - Verifiable offline (no gateway access needed)
 
+pub mod export;
 pub mod log;
 pub mod verify;
-pub mod export;

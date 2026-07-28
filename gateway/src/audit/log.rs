@@ -47,7 +47,10 @@ pub fn entry(
     )?;
 
     // Build the message to sign
-    let message = format!("{}|{}|{}|{}|{}|{}", ts, tenant_id, machine_id, event, payload, prev_hash);
+    let message = format!(
+        "{}|{}|{}|{}|{}|{}",
+        ts, tenant_id, machine_id, event, payload, prev_hash
+    );
 
     // Sign
     let sig = keys.sign(message.as_bytes());

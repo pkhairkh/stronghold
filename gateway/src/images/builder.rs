@@ -1,7 +1,7 @@
 //! Image builder — generate Containerfiles from image.toml and build OCI images.
 
-use anyhow::Result;
 use crate::images::dsl::ImageConfig;
+use anyhow::Result;
 
 /// Generate a Containerfile from an image.toml config.
 pub fn generate_containerfile(config: &ImageConfig) -> Result<String> {
@@ -38,12 +38,23 @@ pub fn generate_containerfile(config: &ImageConfig) -> Result<String> {
     for toolchain in config.toolchains.values() {
         lines.push(String::new());
         match toolchain {
-            crate::images::dsl::Toolchain::Rust { channel, date, targets, components } => {
+            crate::images::dsl::Toolchain::Rust {
+                channel,
+                date,
+                targets,
+                components,
+            } => {
                 lines.push(format!("# Toolchain: rust ({})", channel));
-                lines.push("RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y".to_string());
+                lines.push(
+                    "RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+                        .to_string(),
+                );
                 lines.push("ENV PATH=\"/root/.cargo/bin:${PATH}\"".to_string());
                 if let Some(d) = date {
-                    lines.push(format!("RUN rustup toolchain install {}-{} --profile minimal", channel, d));
+                    lines.push(format!(
+                        "RUN rustup toolchain install {}-{} --profile minimal",
+                        channel, d
+                    ));
                     lines.push(format!("RUN rustup default {}-{}", channel, d));
                 } else {
                     lines.push(format!("RUN rustup default {}", channel));
@@ -61,13 +72,19 @@ pub fn generate_containerfile(config: &ImageConfig) -> Result<String> {
             }
             crate::images::dsl::Toolchain::Node { version } => {
                 lines.push(format!("# Toolchain: node ({})", version));
-                lines.push(format!("RUN curl -fsSL https://rpm.nodesource.com/setup_{}.x | bash -", version));
+                lines.push(format!(
+                    "RUN curl -fsSL https://rpm.nodesource.com/setup_{}.x | bash -",
+                    version
+                ));
                 lines.push("RUN dnf install -y nodejs".to_string());
                 lines.push("RUN npm install -g pnpm".to_string());
             }
             crate::images::dsl::Toolchain::Python { version } => {
                 lines.push(format!("# Toolchain: python ({})", version));
-                lines.push(format!("RUN dnf install -y python{} python{}-pip", version, version));
+                lines.push(format!(
+                    "RUN dnf install -y python{} python{}-pip",
+                    version, version
+                ));
             }
             crate::images::dsl::Toolchain::Go { version } => {
                 lines.push(format!("# Toolchain: go ({})", version));

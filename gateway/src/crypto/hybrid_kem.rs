@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 pub struct PushKeys {
     pub x25519_secret: x25519_dalek::StaticSecret,
     pub x25519_public: x25519_dalek::PublicKey,
-    pub mlkem_secret: Vec<u8>,   // TODO: use ml_kem::DecapsulationKey
-    pub mlkem_public: Vec<u8>,   // TODO: use ml_kem::EncapsulationKey
+    pub mlkem_secret: Vec<u8>, // TODO: use ml_kem::DecapsulationKey
+    pub mlkem_public: Vec<u8>, // TODO: use ml_kem::EncapsulationKey
 }
 
 impl std::fmt::Debug for PushKeys {
@@ -140,7 +140,8 @@ fn hkdf_combine(x25519_shared: &[u8; 32], mlkem_shared: &[u8; 32]) -> [u8; 32] {
 
     let hk = Hkdf::<Sha256>::new(None, &combined);
     let mut okm = [0u8; 32];
-    hk.expand(b"stronghold-push-e2e", &mut okm).expect("HKDF expand failed");
+    hk.expand(b"stronghold-push-e2e", &mut okm)
+        .expect("HKDF expand failed");
     okm
 }
 

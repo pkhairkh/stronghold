@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EscalationRequest {
     pub label: String,
-    pub plan: String,        // Vultr plan ID
-    pub region: String,      // Vultr region ID
-    pub image: String,       // OCI image to run
+    pub plan: String,   // Vultr plan ID
+    pub region: String, // Vultr region ID
+    pub image: String,  // OCI image to run
     pub gpu: bool,
     pub ttl_secs: u64,
 }

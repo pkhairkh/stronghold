@@ -12,9 +12,12 @@ pub fn build_server_config() -> Result<ServerConfig> {
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![], rustls::pki_types::PrivateKeyDer::Pkcs8(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(vec![])
-        ));
+        .with_single_cert(
+            vec![],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                vec![],
+            )),
+        );
 
     // The above will fail at runtime without a real cert, but compiles.
     // In production, load cert + key from /etc/stronghold/keys/

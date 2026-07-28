@@ -1,8 +1,8 @@
 //! k3s scheduler — schedule and manage pods on the worker fleet.
 
-use anyhow::Result;
 use crate::routes::agent::OrderRequest;
 use crate::routes::AppState;
+use anyhow::Result;
 
 pub struct ScheduledMachine {
     pub id: String,
@@ -33,11 +33,19 @@ pub async fn schedule(
         state,
         req.compute.cpu.unwrap_or(4),
         req.compute.memory_gb.unwrap_or(8),
-    ).await?;
+    )
+    .await?;
 
     // Schedule the pod via k3s API
     let pod_name = format!("agent-{}", ulid::Ulid::new());
-    create_pod(&worker, &pod_name, &req.image, req.compute.cpu.unwrap_or(4), req.compute.memory_gb.unwrap_or(8)).await?;
+    create_pod(
+        &worker,
+        &pod_name,
+        &req.image,
+        req.compute.cpu.unwrap_or(4),
+        req.compute.memory_gb.unwrap_or(8),
+    )
+    .await?;
 
     tracing::info!(
         tenant = %tenant_id,
@@ -59,11 +67,13 @@ pub async fn kill_pod(state: &AppState, machine_id: &str) -> Result<()> {
 
     // Find the worker hosting this pod
     let conn = state.db.get()?;
-    let worker: String = conn.query_row(
-        "SELECT worker FROM machines WHERE id = ?1",
-        rusqlite::params![machine_id],
-        |row| row.get(0),
-    ).unwrap_or_else(|_| "unknown".to_string());
+    let worker: String = conn
+        .query_row(
+            "SELECT worker FROM machines WHERE id = ?1",
+            rusqlite::params![machine_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "unknown".to_string());
 
     // Delete the pod via k3s API
     // TODO: implement actual k3s API call

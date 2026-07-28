@@ -21,7 +21,11 @@ struct Cli {
     admin_token: Option<String>,
 
     /// Database path (for local operations)
-    #[arg(long, env = "STRONGHOLD_DB", default_value = "/var/lib/stronghold/stronghold.db")]
+    #[arg(
+        long,
+        env = "STRONGHOLD_DB",
+        default_value = "/var/lib/stronghold/stronghold.db"
+    )]
     db: String,
 }
 
@@ -217,7 +221,10 @@ async fn handle_credentials(action: &CredentialCommands, cli: &Cli) -> anyhow::R
     match action {
         CredentialCommands::Enroll => {
             println!("Open this URL in your phone browser to enroll:");
-            println!("  {}/setup", cli.url.as_deref().unwrap_or("https://gateway:8443"));
+            println!(
+                "  {}/setup",
+                cli.url.as_deref().unwrap_or("https://gateway:8443")
+            );
         }
         CredentialCommands::List { tenant } => {
             println!("Credentials for tenant {} (stub):", tenant);
@@ -232,7 +239,10 @@ async fn handle_credentials(action: &CredentialCommands, cli: &Cli) -> anyhow::R
 async fn handle_agent_token(action: &AgentTokenCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         AgentTokenCommands::Mint { tenant, scope, ttl } => {
-            println!("Minting agent token for tenant {} (scope={}, ttl={}s)", tenant, scope, ttl);
+            println!(
+                "Minting agent token for tenant {} (scope={}, ttl={}s)",
+                tenant, scope, ttl
+            );
             let token = format!("stronghold_agent_stub_{}", ulid::Ulid::new());
             println!("Agent token (save this — it will not be shown again):");
             println!("  {}", token);
@@ -296,10 +306,22 @@ async fn handle_audit(action: &AuditCommands, _cli: &Cli) -> anyhow::Result<()> 
             println!("  ML-DSA-65 signatures: OK");
             println!("  SEV-SNP attestation: OK");
         }
-        AuditCommands::Export { tenant, from, to, format } => {
-            println!("Exporting audit log for tenant {} (format={})", tenant, format);
-            if let Some(f) = from { println!("  from: {}", f); }
-            if let Some(t) = to { println!("  to: {}", t); }
+        AuditCommands::Export {
+            tenant,
+            from,
+            to,
+            format,
+        } => {
+            println!(
+                "Exporting audit log for tenant {} (format={})",
+                tenant, format
+            );
+            if let Some(f) = from {
+                println!("  from: {}", f);
+            }
+            if let Some(t) = to {
+                println!("  to: {}", t);
+            }
             println!("  (stub — no entries)");
         }
     }
@@ -339,7 +361,10 @@ async fn handle_init(data_dir: &str) -> anyhow::Result<()> {
     println!("Database initialized: {}", db_path);
     println!();
     println!("Next steps:");
-    println!("  1. Start the gateway: stronghold-gateway --config {}", data_dir);
+    println!(
+        "  1. Start the gateway: stronghold-gateway --config {}",
+        data_dir
+    );
     println!("  2. Create a tenant: stronghold tenant create --name <your-name>");
     println!("  3. Enroll your phone (URL will be printed by the gateway)");
 

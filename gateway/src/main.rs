@@ -19,8 +19,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod audit;
 mod anomaly;
+mod audit;
 mod crypto;
 mod db;
 mod images;
@@ -126,8 +126,10 @@ async fn serve(bind_addr: &str) -> Result<()> {
     tracing::info!("Database initialized");
 
     // Generate/load keys
-    let audit_keys = crypto::hybrid_sig::AuditKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
-    let push_keys = crypto::hybrid_kem::PushKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
+    let audit_keys =
+        crypto::hybrid_sig::AuditKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
+    let push_keys =
+        crypto::hybrid_kem::PushKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
     tracing::info!("Cryptographic keys loaded");
 
     // Build the axum router
@@ -140,11 +142,7 @@ async fn serve(bind_addr: &str) -> Result<()> {
     tracing::info!("Gateway listening on {}", bind_addr);
 
     // Serve with TLS
-    axum::serve(
-        listener,
-        app.into_make_service(),
-    )
-    .await?;
+    axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
 }
@@ -185,5 +183,7 @@ fn generate_setup_password() -> String {
     let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         .chars()
         .collect();
-    (0..32).map(|_| chars[rand::thread_rng().gen_range(0..chars.len())]).collect()
+    (0..32)
+        .map(|_| chars[rand::thread_rng().gen_range(0..chars.len())])
+        .collect()
 }

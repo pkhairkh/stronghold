@@ -7,8 +7,8 @@
 // all modules are wired up.
 #![allow(dead_code)]
 
-pub mod audit;
 pub mod anomaly;
+pub mod audit;
 pub mod crypto;
 pub mod db;
 pub mod images;

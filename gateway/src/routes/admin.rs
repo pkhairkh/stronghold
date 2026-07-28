@@ -4,11 +4,11 @@
 //! quotas, and configuration. They are authenticated via admin token
 //! (separate from agent tokens).
 
+use crate::routes::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use crate::routes::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTenantRequest {
@@ -43,10 +43,14 @@ pub async fn create_tenant(
 
     // Set quotas if provided
     if let Some(max_machines) = req.max_concurrent_machines {
-        crate::tenants::quotas::set(&state.db, &tenant.id, max_machines,
+        crate::tenants::quotas::set(
+            &state.db,
+            &tenant.id,
+            max_machines,
             req.max_cpu_per_machine.unwrap_or(4),
-            req.max_memory_gb_per_machine.unwrap_or(8))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            req.max_memory_gb_per_machine.unwrap_or(8),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     Ok(Json(TenantResponse {
@@ -55,8 +59,7 @@ pub async fn create_tenant(
         created_at: tenant.created_at,
         setup_password: tenant.setup_password,
         enrollment_url: format!("/setup?tenant={}", tenant.id),
-        sev_snp_measurement: crate::tee::current_measurement()
-            .unwrap_or_default(),
+        sev_snp_measurement: crate::tee::current_measurement().unwrap_or_default(),
     }))
 }
 
@@ -74,7 +77,6 @@ pub async fn get_tenant(
         created_at: tenant.created_at,
         setup_password: "[redacted]".to_string(),
         enrollment_url: format!("/setup?tenant={}", id),
-        sev_snp_measurement: crate::tee::current_measurement()
-            .unwrap_or_default(),
+        sev_snp_measurement: crate::tee::current_measurement().unwrap_or_default(),
     }))
 }

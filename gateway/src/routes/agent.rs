@@ -11,11 +11,11 @@
 //! - `POST /agent/extend` — Request more time (triggers phone approval)
 //! - `GET  /agent/health` — Health check
 
+use crate::routes::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use crate::routes::AppState;
 
 /// Request a new machine (triggers phone approval).
 #[derive(Debug, Deserialize)]
@@ -81,9 +81,8 @@ pub async fn order(
     );
 
     // Create pending session
-    let session_id = crate::sessions::manager::create_pending(
-        &state.db, &tenant_id, &req,
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_id = crate::sessions::manager::create_pending(&state.db, &tenant_id, &req)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Push to phones via ntfy
     crate::push::ntfy::push_approval_request(&tenant_id, &session_id, &req)
@@ -91,25 +90,26 @@ pub async fn order(
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     // Long-poll for decision (60s timeout)
-    let decision = crate::sessions::manager::wait_for_decision(
-        &state.db, &session_id, 60,
-    ).await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let decision = crate::sessions::manager::wait_for_decision(&state.db, &session_id, 60)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match decision {
         crate::sessions::manager::Decision::Approved => {
-            let resp = crate::sessions::manager::finalize_session(
-                &state, &tenant_id, &session_id, &req,
-            ).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let resp =
+                crate::sessions::manager::finalize_session(&state, &tenant_id, &session_id, &req)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(Json(resp))
         }
-        crate::sessions::manager::Decision::Denied => {
-            Err((StatusCode::FORBIDDEN, "Session denied by tenant".to_string()))
-        }
-        crate::sessions::manager::Decision::Timeout => {
-            Err((StatusCode::REQUEST_TIMEOUT, "Approval timed out".to_string()))
-        }
+        crate::sessions::manager::Decision::Denied => Err((
+            StatusCode::FORBIDDEN,
+            "Session denied by tenant".to_string(),
+        )),
+        crate::sessions::manager::Decision::Timeout => Err((
+            StatusCode::REQUEST_TIMEOUT,
+            "Approval timed out".to_string(),
+        )),
     }
 }
 
@@ -195,33 +195,32 @@ pub async fn extend(
     );
 
     // EXTEND triggers a new phone approval
-    let session_id = crate::sessions::manager::create_extend_request(
-        &state.db, &tenant_id, &req,
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_id = crate::sessions::manager::create_extend_request(&state.db, &tenant_id, &req)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     crate::push::ntfy::push_extend_request(&tenant_id, &session_id, &req)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
-    let decision = crate::sessions::manager::wait_for_decision(
-        &state.db, &session_id, 60,
-    ).await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let decision = crate::sessions::manager::wait_for_decision(&state.db, &session_id, 60)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match decision {
         crate::sessions::manager::Decision::Approved => {
-            let resp = crate::sessions::manager::finalize_extend(
-                &state, &tenant_id, &session_id, &req,
-            ).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let resp =
+                crate::sessions::manager::finalize_extend(&state, &tenant_id, &session_id, &req)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(Json(resp))
         }
         crate::sessions::manager::Decision::Denied => {
             Err((StatusCode::FORBIDDEN, "Extension denied".to_string()))
         }
-        crate::sessions::manager::Decision::Timeout => {
-            Err((StatusCode::REQUEST_TIMEOUT, "Approval timed out".to_string()))
-        }
+        crate::sessions::manager::Decision::Timeout => Err((
+            StatusCode::REQUEST_TIMEOUT,
+            "Approval timed out".to_string(),
+        )),
     }
 }
 
@@ -236,19 +235,22 @@ fn extract_token(headers: &axum::http::HeaderMap) -> Result<String, (StatusCode,
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".to_string()))?;
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing Authorization header".to_string(),
+        ))?;
 
     if !auth.starts_with("Bearer ") {
-        return Err((StatusCode::UNAUTHORIZED, "Expected Bearer token".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Expected Bearer token".to_string(),
+        ));
     }
 
     Ok(auth[7..].to_string())
 }
 
-fn authenticate_agent(
-    state: &AppState,
-    token: &str,
-) -> Result<String, (StatusCode, String)> {
+fn authenticate_agent(state: &AppState, token: &str) -> Result<String, (StatusCode, String)> {
     crate::tenants::auth::verify_agent_token(&state.db, token)
         .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))
 }
