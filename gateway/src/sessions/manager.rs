@@ -341,3 +341,159 @@ pub fn pending_approval_stream(
         }
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_memory_pool;
+    use crate::routes::agent::{ComputeRequest, OrderRequest};
+    use crate::tenants::registry;
+
+    fn make_order_req() -> OrderRequest {
+        OrderRequest {
+            image: "stronghold/rust-nightly:2026.07".to_string(),
+            ttl_secs: 3600,
+            reason: "test".to_string(),
+            compute: ComputeRequest {
+                cpu: Some(4),
+                memory_gb: Some(8),
+                dedicated: Some(false),
+                gpu: Some(false),
+            },
+            ephemeral_volumes: vec!["~/work".to_string(), "~/.cache".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_create_pending_session() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let req = make_order_req();
+        let session_id = create_pending(&pool, &tenant.id, &req).unwrap();
+        assert!(session_id.starts_with("sess_"));
+
+        let conn = pool.get().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM pending_sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn test_approve_session() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let req = make_order_req();
+        let session_id = create_pending(&pool, &tenant.id, &req).unwrap();
+
+        approve_session(&pool, &session_id).unwrap();
+
+        let conn = pool.get().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM pending_sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "approved");
+    }
+
+    #[test]
+    fn test_deny_session() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let req = make_order_req();
+        let session_id = create_pending(&pool, &tenant.id, &req).unwrap();
+
+        deny_session(&pool, &session_id).unwrap();
+
+        let conn = pool.get().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM pending_sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "denied");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_decision_timeout() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let req = make_order_req();
+        let session_id = create_pending(&pool, &tenant.id, &req).unwrap();
+
+        let decision = wait_for_decision(&pool, &session_id, 1).await.unwrap();
+        assert!(matches!(decision, Decision::Timeout));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_decision_approved() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let req = make_order_req();
+        let session_id = create_pending(&pool, &tenant.id, &req).unwrap();
+
+        let pool_clone = pool.clone();
+        let sid_clone = session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            approve_session(&pool_clone, &sid_clone).unwrap();
+        });
+
+        let decision = wait_for_decision(&pool, &session_id, 5).await.unwrap();
+        assert!(matches!(decision, Decision::Approved));
+    }
+
+    #[test]
+    fn test_create_extend_request() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO machines (id, tenant_id, image, worker, status, cpu, memory_gb, created_at, expires_at)
+             VALUES (?1, ?2, 'test-image', 'worker-1', 'active', 4, 8, datetime('now'), datetime('now', '+1 hour'))",
+            rusqlite::params!["mach_01HXYZ", tenant.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let req = ExtendRequest {
+            machine_id: "mach_01HXYZ".to_string(),
+            additional_secs: 3600,
+        };
+        let ext_id = create_extend_request(&pool, &tenant.id, &req).unwrap();
+        assert!(ext_id.starts_with("ext_"));
+    }
+
+    #[test]
+    fn test_scopes_default_config() {
+        let config = scopes::ScopeConfig::default();
+        assert_eq!(config.scopes.len(), 3);
+        assert_eq!(config.scopes[0].name, "default");
+        assert_eq!(config.scopes[1].name, "extended");
+        assert_eq!(config.scopes[2].name, "destructive");
+        assert_eq!(config.scopes[2].require_credentials, 2);
+    }
+
+    #[test]
+    fn test_matches_deceptive_pattern() {
+        let config = scopes::ScopeConfig::default();
+        assert!(scopes::matches_deceptive_pattern(&config, "rm -rf /").is_some());
+        assert!(scopes::matches_deceptive_pattern(&config, "git push --force").is_some());
+        assert!(scopes::matches_deceptive_pattern(&config, "ls -la").is_none());
+    }
+}
+

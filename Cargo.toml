@@ -97,6 +97,10 @@ sev = "4.0"
 # Container registry client
 oci-distribution = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 
+# Kubernetes client (for k3s scheduler)
+kube = { version = "0.95", default-features = false, features = ["client", "rustls-tls", "runtime"] }
+k8s-openapi = { version = "0.23", features = ["latest"] }
+
 # Property-based testing
 proptest = "1.5"
 tempfile = "3.10"

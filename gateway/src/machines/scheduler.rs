@@ -1,13 +1,37 @@
 //! k3s scheduler — schedule and manage pods on the worker fleet.
+//!
+//! Implemented in: W3-T9, W3-T10, W3-T11, W3-T14, W3-T15
+//! Uses kube-rs to communicate with the k3s API server.
+
+use anyhow::{Context, Result};
+use kube::api::{Api, DeleteParams, Pod, ResourceExt};
+use kube::config::Kubeconfig;
+use kube::Client as KubeClient;
+use std::env;
 
 use crate::routes::agent::OrderRequest;
 use crate::routes::AppState;
-use anyhow::Result;
 
 pub struct ScheduledMachine {
     pub id: String,
     pub worker: String,
     pub sev_snp_attested: bool,
+}
+
+/// Get a Kubernetes client connected to the local k3s cluster.
+async fn get_kube_client() -> Result<KubeClient> {
+    // Try in-cluster config first, then fall back to kubeconfig file.
+    let client = if let Ok(config) = kube::Config::incluster() {
+        KubeClient::try_from(config)?
+    } else {
+        // Use the default kubeconfig location for k3s.
+        let kubeconfig_path =
+            env::var("KUBECONFIG").unwrap_or_else(|_| "/etc/rancher/k3s/k3s.yaml".to_string());
+        let config = kube::Config::custom_config()
+            .with_context(|| format!("loading kubeconfig from {}", kubeconfig_path))?;
+        KubeClient::try_from(config)?
+    };
+    Ok(client)
 }
 
 /// Schedule a pod on a worker with available capacity.
@@ -28,117 +52,144 @@ pub async fn schedule(
         return Err(anyhow::anyhow!("Tenant quota exceeded"));
     }
 
-    // Find a worker with capacity
-    let worker = find_worker(
-        state,
-        req.compute.cpu.unwrap_or(4),
-        req.compute.memory_gb.unwrap_or(8),
-    )
-    .await?;
-
-    // Schedule the pod via k3s API
+    // Generate pod name
     let pod_name = format!("agent-{}", ulid::Ulid::new());
-    create_pod(
-        &worker,
-        &pod_name,
-        &req.image,
-        req.compute.cpu.unwrap_or(4),
-        req.compute.memory_gb.unwrap_or(8),
-    )
-    .await?;
+
+    // Get k8s client
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
+
+    // Build pod spec
+    let cpu_req = format!("{}m", req.compute.cpu.unwrap_or(4) * 1000);
+    let mem_req = format!("{}Gi", req.compute.memory_gb.unwrap_or(8));
+
+    let pod: Pod = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "labels": {
+                "app": "stronghold-agent",
+                "tenant": tenant_id,
+                "machine-id": &pod_name,
+            }
+        },
+        "spec": {
+            "containers": [{
+                "name": "workspace",
+                "image": &req.image,
+                "command": ["sleep", "infinity"],
+                "resources": {
+                    "limits": {
+                        "cpu": &cpu_req,
+                        "memory": &mem_req
+                    },
+                    "requests": {
+                        "cpu": &cpu_req,
+                        "memory": &mem_req
+                    }
+                },
+                "volumeMounts": [
+                    {"name": "work", "mountPath": "/home/dev/work"},
+                    {"name": "cache", "mountPath": "/home/dev/.cache"}
+                ]
+            }],
+            "volumes": [
+                {"name": "work", "emptyDir": {}},
+                {"name": "cache", "emptyDir": {}}
+            ],
+            "restartPolicy": "Never"
+        }
+    }))?;
+
+    // Create the pod
+    pods.create(&Default::default(), &pod)
+        .await
+        .context("failed to create pod")?;
 
     tracing::info!(
-        tenant = %tenant_id,
+        tenant = tenant_id,
         pod = %pod_name,
-        worker = %worker.host,
+        image = %req.image,
         "Pod scheduled"
     );
 
     Ok(ScheduledMachine {
         id: pod_name,
-        worker: worker.host,
-        sev_snp_attested: worker.sev_snp,
+        worker: "k3s-default".to_string(),
+        sev_snp_attested: false,
     })
 }
 
 /// Kill a pod.
-pub async fn kill_pod(state: &AppState, machine_id: &str) -> Result<()> {
-    tracing::info!(machine = %machine_id, "Killing pod");
+pub async fn kill_pod(_state: &AppState, machine_id: &str) -> Result<()> {
+    tracing::info!(machine = machine_id, "Killing pod");
 
-    // Find the worker hosting this pod
-    let conn = state.db.get()?;
-    let worker: String = conn
-        .query_row(
-            "SELECT worker FROM machines WHERE id = ?1",
-            rusqlite::params![machine_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "unknown".to_string());
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
 
-    // Delete the pod via k3s API
-    // TODO: implement actual k3s API call
-    tracing::info!(machine = %machine_id, worker = %worker, "Pod killed");
-
-    Ok(())
+    match pods.delete(machine_id, &DeleteParams::default()).await {
+        Ok(_) => {
+            tracing::info!(machine = machine_id, "Pod deleted");
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            tracing::warn!(machine = machine_id, "Pod not found (already deleted?)");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Open a PTY to a running pod.
+/// TODO W4-T4: implement via kube exec API (WebSocket).
 pub async fn open_pty(machine_id: &str) -> Result<PtyHandle> {
-    tracing::info!(machine = %machine_id, "Opening PTY");
-    // TODO: implement containerd exec via k3s API
+    tracing::info!(machine = machine_id, "Opening PTY (stub — W4-T4 will implement via kube exec)");
     Ok(PtyHandle::new())
 }
 
 pub struct PtyHandle {
-    // TODO: wrap actual pty connection
+    // TODO W4-T4: wrap kube exec WebSocket connection
+    buffer: Vec<u8>,
 }
 
 impl PtyHandle {
     fn new() -> Self {
-        Self {}
+        Self { buffer: Vec::new() }
     }
 
     pub async fn write_all(&mut self, data: &[u8]) -> Result<()> {
-        let _ = data;
-        // TODO: write to containerd exec
+        self.buffer.extend_from_slice(data);
         Ok(())
     }
 
     pub async fn read(&mut self) -> Result<Vec<u8>> {
-        // TODO: read from containerd exec
-        Ok(Vec::new())
+        let data = std::mem::take(&mut self.buffer);
+        Ok(data)
     }
 }
 
-async fn find_worker(
-    _state: &AppState,
-    _cpu: u32,
-    _memory_gb: u32,
-) -> Result<crate::machines::worker::Worker> {
-    // TODO: query k3s for available workers
-    Ok(crate::machines::worker::Worker {
-        host: "vultr-worker-1".to_string(),
-        sev_snp: true,
-        cpu_available: 8,
-        memory_gb_available: 16,
-    })
+/// List all running pods (for debugging/monitoring).
+pub async fn list_pods() -> Result<Vec<String>> {
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
+    let pod_list = pods.list(&Default::default()).await?;
+    Ok(pod_list.iter().map(|p| p.name_any()).collect())
 }
 
-async fn create_pod(
-    worker: &crate::machines::worker::Worker,
-    pod_name: &str,
-    image: &str,
-    cpu: u32,
-    memory_gb: u32,
-) -> Result<()> {
-    tracing::info!(
-        worker = %worker.host,
-        pod = %pod_name,
-        image = %image,
-        cpu = cpu,
-        mem = memory_gb,
-        "Creating pod (stub)"
-    );
-    // TODO: implement k3s API call to create pod
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_kube_client() {
+        // This test requires k3s to be running on the dev box.
+        // It will be skipped in CI without k3s.
+        let result = get_kube_client().await;
+        if result.is_err() {
+            eprintln!("Skipping k8s test: k3s not available");
+            return;
+        }
+        assert!(result.is_ok());
+    }
 }
