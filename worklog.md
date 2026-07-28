@@ -577,3 +577,113 @@ Stage Summary:
 - docs/CRYPTO.md written
 - Next: Wave 2 (Database & Tenants) — 10 tasks
 - Wave 2 entry conditions met: crypto foundations in place
+
+---
+Task ID: W8
+Agent: general-purpose
+Task: Phone Enrollment & PWA (W8-T1..W8-T10 frontend subset)
+
+Work Log:
+- Reviewed phone/enroll.html — confirmed existing WebAuthn ceremonies were
+  on the right track but needed hardening, accessibility, PWA installability,
+  and a working SSE client.
+- W8-T1 (WebAuthn enrollment): kept navigator.credentials.create() with
+  authenticatorAttachment='platform' + userVerification='required'; added
+  residentKey='preferred', attestation='none', ES256+RS256 algos; added
+  NotAllowedError handling (user cancellation/timeout); added aria-busy
+  state on the button during ceremony.
+- W8-T2 (WebAuthn approval): kept navigator.credentials.get() with
+  userVerification='required'; posts assertion (credential_id,
+  authenticator_data, client_data_json, signature) to /phone/decide.
+- W8-T6 (PWA manifest + service worker):
+  - phone/manifest.json: name, short_name, description, start_url=/setup,
+    scope=/, display=standalone, theme_color, background_color, two icons
+    (any + maskable, both SVG with sizes="any").
+  - phone/sw.js: pre-caches /static/{manifest.json,icon.svg,icon-maskable.svg};
+    network-first for navigations (caches /setup opportunistically for
+    offline fallback); cache-first for static assets; pass-through for
+    non-GET, SSE (text/event-stream), and WebSocket requests; activate
+    handler purges old caches; clients.claim() + skipWaiting() for fast
+    activation.
+  - phone/icon.svg + phone/icon-maskable.svg: shield + checkmark SVG icons
+    (no binary asset generation needed).
+  - enroll.html: <link rel="manifest">, <link rel="apple-touch-icon">,
+    theme-color meta (separate for light/dark), apple-mobile-web-app-capable,
+    mobile-web-app-capable, viewport-fit=cover for notch safe areas.
+- W8-T5 (SSE): replaced EventSource with fetch()-based streaming reader.
+  EventSource cannot send custom Authorization headers and the gateway's
+  /phone/pending requires `Bearer <phone_token>`. New client:
+  - Sends Authorization header on every connect.
+  - Parses SSE frames (event:/data: lines, blank-line separators, leading-:
+    comment lines treated as keepalive).
+  - Exponential backoff: 1s -> 2s -> 4s -> ... -> 30s cap, reset to 1s on
+    successful connect.
+  - Heartbeat watchdog: if no bytes received within 45s (gateway sends
+    `data: heartbeat` every 30s), reader.cancel() fires and reconnect runs.
+  - AbortController for clean teardown on unenroll / page unload.
+  - online/offline event listeners trigger reconnect.
+- W8-T4 (Active sessions dashboard + REVOKE):
+  - #sessions-list renders session cards from SSE session_started /
+    session_updated events; #pending-list renders approval cards from
+    approval_request events. Both have empty-state messages.
+  - Each session card has a REVOKE button that POSTs to /phone/revoke
+    with {machine_id}. On 200, card gets .revoked class, button disabled
+    + relabeled 'Revoked', then card removed after 1.5s.
+  - Event delegation via document-level click listener + data-action
+    attributes (CSP-friendly; no inline onclick string interpolation).
+- W8-T8 (Mobile UX polish):
+  - All buttons/inputs min-height 44px; on pointer:coarse devices, 48px.
+  - Auto dark/light theme via prefers-color-scheme CSS variables.
+  - navigator.vibrate() haptics on Approve/Deny/Revoke/Anomaly/Enroll
+    success and error paths; wrapped in try/catch because iOS Safari
+    lacks the API.
+  - prefers-reduced-motion: transitions/transforms disabled.
+  - viewport-fit=cover + safe-area-inset-{top,bottom} padding for notch.
+  - font-size: 16px on inputs prevents iOS auto-zoom on focus.
+  - touch-action: manipulation on buttons eliminates 300ms tap delay.
+  - Toast notifications for transient events (new approval, anomaly,
+    back online, offline).
+  - Connection status banner (Live / Reconnecting… / Offline) with
+    color-coded status dot, role=status + aria-live=polite.
+- W8 (Accessibility):
+  - Semantic HTML: <header>, <main>, <section>, role=list / listitem.
+  - aria-labelledby on each section heading; aria-label on icon-only or
+    short-text buttons ("Revoke session <id>", "Approve session request
+    <id>", etc.).
+  - aria-live regions: role=alert + aria-live=assertive for errors,
+    role=status + aria-live=polite for success/measurements/connection
+    state, role=status + aria-live=polite for toast.
+  - .sr-only utility class for screen-reader-only text where needed.
+  - Inputs have aria-describedby pointing at help text.
+  - aria-busy='true' on enroll button during ceremony.
+  - Logo SVG marked aria-hidden + focusable=false.
+  - escapeHtml() applied to all server-supplied strings before
+    innerHTML assignment (XSS hardening since SSE payloads are untrusted).
+- W8 (README): phone/README.md documents files, DoD checklist, SSE design
+  rationale, browser support matrix (Safari iOS 15.4+, Chrome Android,
+  Firefox Android, Safari macOS, Chrome macOS), security notes about
+  localStorage token scoping and platform authenticator key storage.
+
+Verification:
+- manifest.json: valid JSON (python json.load).
+- enroll.html <script>: extracted and passed `node --check`.
+- sw.js: passed `node --check`.
+- icon.svg, icon-maskable.svg: parse as valid XML (ElementTree).
+- 36 of 37 sanity-check constructs present in enroll.html (the one
+  "missing" was role="listitem" as a literal HTML attribute — it is set
+  dynamically via setAttribute('role','listitem') on session/approval
+  cards, which is functionally equivalent).
+- Dev box build: `cd /root/stronghold && cargo build --workspace
+  --features no-sev-snp` → finished, 0 errors, 0 warnings.
+
+Stage Summary:
+- Files created: phone/manifest.json, phone/sw.js, phone/icon.svg,
+  phone/icon-maskable.svg, phone/README.md
+- Files modified: phone/enroll.html (884 lines added/modified)
+- No Rust code touched.
+- Commit b6e4a6a pushed to GitHub main; dev box synced.
+- Wave 8 frontend subset (W8-T1, T2, T4, T5, T6, T8) complete.
+- Remaining W8 tasks not in this ticket's scope: W8-T3 (PQC WASM bundle),
+  W8-T7 (quorum UI), W8-T9 (anomaly deep-link detail page — anomaly
+  alerts render as cards in this revision, no separate detail route),
+  W8-T10 (Playwright cross-browser matrix).
