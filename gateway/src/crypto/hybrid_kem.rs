@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use kem::{Decapsulate, Encapsulate};
 use ml_kem::{
-    param::EncodedCiphertext, Encoded, EncodedSizeUser, KemCore, MlKem768,
-    kem::{DecapsulationKey, EncapsulationKey, MlKem768Params},
+    Encoded, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
+    kem::{DecapsulationKey, EncapsulationKey},
 };
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -324,8 +324,8 @@ pub fn decapsulate(
     }
     let mut ct_arr = [0u8; MLKEM_CIPHERTEXT_LEN];
     ct_arr.copy_from_slice(&encapsulated.mlkem_ciphertext);
-    let ct_encoded = Encoded::<EncodedCiphertext<MlKem768Params>>::from(&ct_arr);
-    let ct = EncodedCiphertext::<MlKem768Params>::from(&ct_encoded);
+    let ct_encoded = Encoded::<ml_kem::Ciphertext<MlKem768>>::from(&ct_arr);
+    let ct = ml_kem::Ciphertext::<MlKem768>::from(&ct_encoded);
 
     if keys.mlkem_secret.len() != MLKEM_SECRET_LEN {
         return Err(anyhow::anyhow!(
