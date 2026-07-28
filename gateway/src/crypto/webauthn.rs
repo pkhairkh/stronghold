@@ -646,7 +646,9 @@ mod tests {
 
     // --- Property tests ---
 
-    proptest::prelude::proptest! {
+    use proptest::prelude::*;
+
+    proptest! {
         #[test]
         fn proptest_challenge_deterministic(
             cmd_hash in proptest::prelude::any::<String>(),
