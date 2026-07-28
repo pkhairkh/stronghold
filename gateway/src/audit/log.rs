@@ -7,7 +7,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::crypto::hybrid_sig::{AuditKeys, DualSignature};
+use crate::crypto::hybrid_sig::AuditKeys;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {

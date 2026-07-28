@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use base64::Engine;
-use ed25519_dalek::{Signer, Verifier, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, Verifier, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

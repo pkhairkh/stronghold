@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn handle_tenant(action: &TenantCommands, cli: &Cli) -> anyhow::Result<()> {
+async fn handle_tenant(action: &TenantCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         TenantCommands::Create { name } => {
             println!("Creating tenant: {}", name);
@@ -226,7 +226,7 @@ async fn handle_credentials(action: &CredentialCommands, cli: &Cli) -> anyhow::R
     Ok(())
 }
 
-async fn handle_agent_token(action: &AgentTokenCommands, cli: &Cli) -> anyhow::Result<()> {
+async fn handle_agent_token(action: &AgentTokenCommands, _cli: &Cli) -> anyhow::Result<()> {
     match action {
         AgentTokenCommands::Mint { tenant, scope, ttl } => {
             println!("Minting agent token for tenant {} (scope={}, ttl={}s)", tenant, scope, ttl);

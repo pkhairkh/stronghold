@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use sha2::Digest;
+
+/// Type alias for a single audit row from the database.
+type AuditRow = (i64, String, String, String, String, String, String, String, String, Option<String>);
 
 /// Verify the entire audit log for a tenant.
 ///
@@ -27,7 +29,7 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
          ORDER BY seq ASC"
     )?;
 
-    let entries: Vec<(i64, String, String, String, String, String, String, String, String, Option<String>)> = stmt
+    let entries: Vec<AuditRow> = stmt
         .query_map([tenant_id], |row| {
             Ok((
                 row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,

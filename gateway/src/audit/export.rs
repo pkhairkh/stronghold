@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 
 pub struct ExportOptions {
     pub tenant_id: String,

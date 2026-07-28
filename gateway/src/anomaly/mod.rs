@@ -4,7 +4,6 @@
 //! Pushes the tenant's phone for review when patterns match.
 
 use regex::Regex;
-use std::sync::Arc;
 
 /// Anomaly patterns loaded from `anomaly.toml`.
 pub struct AnomalyScanner {
@@ -76,13 +75,16 @@ impl AnomalyScanner {
                 push: true,
             },
             AnomalyPattern {
-                regex: Regex::new(r"rm -rf (?!/tmp/|target/)").unwrap(),
-                message: "destructive rm outside allowed paths".to_string(),
+                // Note: Rust's regex crate doesn't support look-around.
+                // Match all `rm -rf` — path filtering will be done in code (Wave 4).
+                regex: Regex::new(r"rm -rf").unwrap(),
+                message: "destructive rm detected (verify path)".to_string(),
                 push: true,
             },
             AnomalyPattern {
-                regex: Regex::new(r"sudo (?!cargo|lake|qemu|wasmtime)").unwrap(),
-                message: "privilege escalation attempt".to_string(),
+                // Match all `sudo <cmd>` — command allowlist check done in code (Wave 4).
+                regex: Regex::new(r"sudo\s+\S+").unwrap(),
+                message: "privilege escalation attempt (verify command)".to_string(),
                 push: true,
             },
             AnomalyPattern {

@@ -5,7 +5,6 @@
 //! holds both public halves.
 
 use anyhow::Result;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// A hybrid KEM keypair (X25519 + ML-KEM-768).
@@ -37,6 +36,7 @@ pub struct EncapsulatedSecret {
 
 impl PushKeys {
     /// Generate a new hybrid keypair.
+    #[allow(clippy::needless_borrow)] // false positive: From<&StaticSecret> requires the &
     pub fn generate() -> Self {
         let mut rng = rand::rngs::OsRng;
         let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
@@ -91,6 +91,7 @@ impl PushKeys {
 ///
 /// Returns `(encapsulated_secret, shared_secret)` where `shared_secret`
 /// is used to derive an AES-256-GCM key via HKDF-256.
+#[allow(clippy::needless_borrow)] // false positive: From<&StaticSecret> requires the &
 pub fn encapsulate(
     phone_x25519_pub: &[u8],
     phone_mlkem_pub: &[u8],

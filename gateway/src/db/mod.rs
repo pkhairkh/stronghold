@@ -3,7 +3,6 @@
 use anyhow::Result;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
 
 /// Initialize the connection pool and create tables if they don't exist.
 pub fn init_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
