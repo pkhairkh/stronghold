@@ -58,7 +58,8 @@ rand_core = "0.6"
 
 # Cryptography — post-quantum (FIPS 203/204)
 ml-dsa = "0.0.4"
-ml-kem = "0.2"
+ml-kem = { version = "0.2", features = ["deterministic"] }
+kem = "0.3"
 # Note: pqc-kyber is pulled in via rustls feature flag
 
 # HTTP client (for ntfy, Vultr API)
