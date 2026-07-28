@@ -40,7 +40,7 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
     let mut prev_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
     let mut errors = Vec::new();
 
-    for (seq, ts, machine_id, event, payload, entry_prev_hash, hash, sig_ed, sig_mldsa, sev_hash) in entries {
+    for (seq, ts, machine_id, event, payload, entry_prev_hash, hash, sig_ed, sig_mldsa, sev_hash) in &entries {
         // Check hash chain
         if entry_prev_hash != prev_hash {
             errors.push(format!("seq {}: hash chain broken (expected {}, got {})", seq, prev_hash, entry_prev_hash));
