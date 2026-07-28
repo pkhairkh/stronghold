@@ -3,6 +3,7 @@
 use anyhow::Result;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use sha2::Digest;
 
 /// Verify the entire audit log for a tenant.
 ///

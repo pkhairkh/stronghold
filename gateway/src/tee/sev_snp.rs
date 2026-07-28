@@ -10,7 +10,6 @@
 use anyhow::Result;
 use base64::Engine;
 use serde::Serialize;
-use sha2::Digest;
 
 #[derive(Debug, Serialize)]
 pub struct AttestationReport {
