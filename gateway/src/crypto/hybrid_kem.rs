@@ -9,8 +9,10 @@
 
 use anyhow::{Context, Result};
 use kem::{Decapsulate, Encapsulate};
-use ml_kem::{MlKem768, Encoded, EncodedSizeUser};
-use rand::CryptoRngCore;
+use ml_kem::{
+    param::EncodedCiphertext, Encoded, EncodedSizeUser, KemCore, MlKem768,
+    kem::{DecapsulationKey, EncapsulationKey, MlKem768Params},
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::path::Path;
@@ -89,7 +91,7 @@ impl PushKeys {
     /// Generate a new hybrid keypair.
     ///
     /// - X25519: uses `OsRng` (platform CSPRNG).
-    /// - ML-KEM-768: uses `OsRng` via the `ml_kem` crate's `generate()`.
+    /// - ML-KEM-768: uses `OsRng` via the `ml_kem` crate's `KemCore::generate()`.
     pub fn generate() -> Self {
         let mut rng = rand::rngs::OsRng;
 
@@ -251,20 +253,13 @@ pub fn encapsulate(
             X25519_PUBLIC_LEN
         ));
     }
-    let ephemeral_secret = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
-    let ephemeral_public = ephemeral_secret.diffie_hellman(
-        &x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(phone_x25519_pub)?),
-    );
-    // Note: `diffie_hellman` on `EphemeralSecret` returns `PublicKey` (the
-    // ephemeral public key bytes), not the shared secret. We need to use
-    // `StaticSecret::diffie_hellman` for that. Let me fix the API usage:
-    let _ = ephemeral_public; // suppress unused warning
+    let mut pub_arr = [0u8; X25519_PUBLIC_LEN];
+    pub_arr.copy_from_slice(phone_x25519_pub);
+    let phone_x_pub = x25519_dalek::PublicKey::from(pub_arr);
 
-    // Use StaticSecret for actual DH (since EphemeralSecret API changed in x25519-dalek 2.x).
-    let static_ephemeral = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
-    let static_ephemeral_pub = x25519_dalek::PublicKey::from(&static_ephemeral);
-    let phone_x_pub = x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(phone_x25519_pub)?);
-    let x25519_shared = static_ephemeral.diffie_hellman(&phone_x_pub);
+    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+    let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
+    let x25519_shared = ephemeral_secret.diffie_hellman(&phone_x_pub);
     let x25519_shared_bytes = x25519_shared.to_bytes();
 
     // --- ML-KEM-768 ---
@@ -275,10 +270,10 @@ pub fn encapsulate(
             MLKEM_PUB_LEN
         ));
     }
-    let ek_bytes = <[u8; MLKEM_PUB_LEN]>::try_from(phone_mlkem_pub)
-        .map_err(|_| anyhow::anyhow!("failed to convert mlkem pub to fixed array"))?;
-    let ek_encoded = Encoded::<ml_kem::kem::EncapsulationKey<ml_kem::MlKem768Params>>::from(&ek_bytes);
-    let ek = ml_kem::kem::EncapsulationKey::<ml_kem::MlKem768Params>::from_bytes(&ek_encoded);
+    let mut ek_arr = [0u8; MLKEM_PUB_LEN];
+    ek_arr.copy_from_slice(phone_mlkem_pub);
+    let ek_encoded = Encoded::<EncapsulationKey<MlKem768Params>>::from(&ek_arr);
+    let ek = EncapsulationKey::<MlKem768Params>::from_bytes(&ek_encoded);
     let (ct, mlkem_shared) = ek
         .encapsulate(&mut rng)
         .map_err(|e| anyhow::anyhow!("ml-kem encapsulate failed: {:?}", e))?;
@@ -289,7 +284,7 @@ pub fn encapsulate(
 
     Ok((
         EncapsulatedSecret {
-            x25519_ciphertext: static_ephemeral_pub.to_bytes().to_vec(),
+            x25519_ciphertext: ephemeral_public.to_bytes().to_vec(),
             mlkem_ciphertext: ct.to_vec(),
         },
         combined,
@@ -313,7 +308,9 @@ pub fn decapsulate(
             X25519_PUBLIC_LEN
         ));
     }
-    let peer_pub = x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(&encapsulated.x25519_ciphertext)?);
+    let mut peer_arr = [0u8; X25519_PUBLIC_LEN];
+    peer_arr.copy_from_slice(&encapsulated.x25519_ciphertext);
+    let peer_pub = x25519_dalek::PublicKey::from(peer_arr);
     let x25519_shared = keys.x25519_secret.diffie_hellman(&peer_pub);
     let x25519_shared_bytes = x25519_shared.to_bytes();
 
@@ -325,15 +322,22 @@ pub fn decapsulate(
             MLKEM_CIPHERTEXT_LEN
         ));
     }
-    let ct_bytes = <[u8; MLKEM_CIPHERTEXT_LEN]>::try_from(&encapsulated.mlkem_ciphertext)
-        .map_err(|_| anyhow::anyhow!("failed to convert mlkem ct to fixed array"))?;
-    let ct_encoded = Encoded::<ml_kem::EncodedCiphertext<ml_kem::MlKem768Params>>::from(&ct_bytes);
-    let ct = ml_kem::EncodedCiphertext::<ml_kem::MlKem768Params>::from(&ct_encoded);
+    let mut ct_arr = [0u8; MLKEM_CIPHERTEXT_LEN];
+    ct_arr.copy_from_slice(&encapsulated.mlkem_ciphertext);
+    let ct_encoded = Encoded::<EncodedCiphertext<MlKem768Params>>::from(&ct_arr);
+    let ct = EncodedCiphertext::<MlKem768Params>::from(&ct_encoded);
 
-    let dk_bytes = <[u8; MLKEM_SECRET_LEN]>::try_from(&keys.mlkem_secret)
-        .map_err(|_| anyhow::anyhow!("failed to convert mlkem secret to fixed array"))?;
-    let dk_encoded = Encoded::<ml_kem::kem::DecapsulationKey<ml_kem::MlKem768Params>>::from(&dk_bytes);
-    let dk = ml_kem::kem::DecapsulationKey::<ml_kem::MlKem768Params>::from_bytes(&dk_encoded);
+    if keys.mlkem_secret.len() != MLKEM_SECRET_LEN {
+        return Err(anyhow::anyhow!(
+            "mlkem_secret is {} bytes, expected {}",
+            keys.mlkem_secret.len(),
+            MLKEM_SECRET_LEN
+        ));
+    }
+    let mut dk_arr = [0u8; MLKEM_SECRET_LEN];
+    dk_arr.copy_from_slice(&keys.mlkem_secret);
+    let dk_encoded = Encoded::<DecapsulationKey<MlKem768Params>>::from(&dk_arr);
+    let dk = DecapsulationKey::<MlKem768Params>::from_bytes(&dk_encoded);
 
     let mlkem_shared = dk
         .decapsulate(&ct)
