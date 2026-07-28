@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <!-- Maskable icon: full-bleed background with safe zone (inner 80%) for the shield -->
+  <rect width="192" height="192" fill="#4ade80"/>
+  <path d="M96 40 L140 58 L140 96 C140 124 120 144 96 150 C72 144 52 124 52 96 L52 58 Z"
+        fill="#0a0a0a" stroke="#22c55e" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M76 96 L90 110 L116 84"
+        stroke="#4ade80" stroke-width="8" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -2,122 +2,396 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+    <!-- PWA / mobile web app meta -->
+    <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f5f5f5" media="(prefers-color-scheme: light)">
     <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Stronghold</title>
+    <meta name="apple-mobile-web-app-title" content="Stronghold">
+    <meta name="description" content="Stronghold phone enrollment — approve or revoke compute sessions with WebAuthn.">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon.svg">
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+
+    <title>Stronghold — Phone Enrollment</title>
     <style>
+        :root {
+            /* Dark theme (default) */
+            --bg: #0a0a0a;
+            --bg-card: #1a1a1a;
+            --bg-input: #111;
+            --border: #2a2a2a;
+            --text: #e0e0e0;
+            --text-muted: #aaa;
+            --text-dim: #888;
+            --text-faint: #666;
+            --primary: #4ade80;
+            --primary-active: #22c55e;
+            --danger: #f87171;
+            --danger-active: #ef4444;
+            --warning: #fbbf24;
+            --accent: #60a5fa;
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f5f5f5;
+                --bg-card: #ffffff;
+                --bg-input: #fafafa;
+                --border: #d4d4d4;
+                --text: #1a1a1a;
+                --text-muted: #555;
+                --text-dim: #666;
+                --text-faint: #888;
+                --primary: #16a34a;
+                --primary-active: #15803d;
+                --danger: #dc2626;
+                --danger-active: #b91c1c;
+                --warning: #d97706;
+                --accent: #2563eb;
+            }
+        }
+
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
+
+        html, body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: #0a0a0a;
-            color: #e0e0e0;
+            background: var(--bg);
+            color: var(--text);
             min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 20px;
+            padding: calc(20px + var(--safe-top)) 16px calc(20px + var(--safe-bottom));
         }
+
         .container { max-width: 500px; width: 100%; }
-        h1 { font-size: 1.8rem; margin-bottom: 8px; color: #fff; }
-        h2 { font-size: 1.2rem; margin: 24px 0 12px; color: #aaa; }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        h1 .logo {
+            width: 32px;
+            height: 32px;
+            flex-shrink: 0;
+        }
+
+        h2 {
+            font-size: 1.2rem;
+            margin: 24px 0 12px;
+            color: var(--text-muted);
+        }
+
         .card {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
             border-radius: 12px;
             padding: 20px;
             margin-bottom: 16px;
         }
-        .session-card {
-            border-left: 3px solid #4ade80;
-        }
-        .session-card.anomaly { border-left-color: #fbbf24; }
-        .session-card.revoked { border-left-color: #f87171; opacity: 0.6; }
-        input, button {
+
+        .session-card { border-left: 3px solid var(--primary); }
+        .session-card.anomaly { border-left-color: var(--warning); }
+        .session-card.revoked { border-left-color: var(--danger); opacity: 0.6; }
+        .session-card.pending { border-left-color: var(--warning); }
+
+        input, button, .btn-fake {
             width: 100%;
-            padding: 14px;
+            min-height: 44px;   /* iOS HIG / Material tap target */
+            padding: 12px 14px;
             border-radius: 10px;
-            border: 1px solid #333;
-            background: #111;
-            color: #e0e0e0;
-            font-size: 16px;
+            border: 1px solid var(--border);
+            background: var(--bg-input);
+            color: var(--text);
+            font-size: 16px;     /* prevents iOS zoom on focus */
             margin-bottom: 12px;
+            font-family: inherit;
         }
+
+        input:focus {
+            outline: 2px solid var(--primary);
+            outline-offset: -1px;
+        }
+
         button {
             cursor: pointer;
             font-weight: 600;
-            transition: background 0.2s;
+            transition: background 0.15s, transform 0.05s;
+            -webkit-appearance: none;
+            appearance: none;
+            touch-action: manipulation;
         }
-        button.primary { background: #4ade80; color: #0a0a0a; border: none; }
-        button.primary:active { background: #22c55e; }
-        button.danger { background: #f87171; color: #0a0a0a; border: none; }
-        button.danger:active { background: #ef4444; }
-        button.secondary { background: #2a2a2a; color: #e0e0e0; }
-        .info { font-size: 0.85rem; color: #888; margin-top: 8px; }
-        .label { font-size: 0.8rem; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
-        .value { font-size: 0.95rem; color: #ccc; margin-bottom: 12px; word-break: break-all; }
-        .measurement { font-family: monospace; font-size: 0.75rem; color: #4ade80; word-break: break-all; }
-        .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        .status-dot.active { background: #4ade80; }
-        .status-dot.pending { background: #fbbf24; }
-        .status-dot.revoked { background: #f87171; }
-        #error { color: #f87171; font-size: 0.9rem; margin-top: 8px; display: none; }
-        #success { color: #4ade80; font-size: 0.9rem; margin-top: 8px; display: none; }
-        .hidden { display: none; }
+
+        button:active { transform: scale(0.98); }
+
+        button.primary {
+            background: var(--primary);
+            color: #0a0a0a;
+            border: none;
+        }
+        button.primary:active { background: var(--primary-active); }
+
+        button.danger {
+            background: var(--danger);
+            color: #0a0a0a;
+            border: none;
+        }
+        button.danger:active { background: var(--danger-active); }
+
+        button.secondary {
+            background: var(--bg-card);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+        button.secondary:active { background: var(--border); }
+
+        .btn-row {
+            display: flex;
+            gap: 8px;
+        }
+        .btn-row button { margin-bottom: 0; }
+
+        .info { font-size: 0.85rem; color: var(--text-dim); margin-top: 8px; }
+        .label {
+            font-size: 0.8rem;
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 4px;
+        }
+        .value {
+            font-size: 0.95rem;
+            color: var(--text);
+            margin-bottom: 12px;
+            word-break: break-all;
+        }
+        .measurement {
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.75rem;
+            color: var(--primary);
+            word-break: break-all;
+            background: var(--bg-input);
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+        .status-dot.connected { background: var(--primary); }
+        .status-dot.connecting { background: var(--warning); }
+        .status-dot.disconnected { background: var(--danger); }
+
+        #error, #success, #toast {
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 0.9rem;
+            margin-top: 8px;
+            display: none;
+        }
+        #error {
+            background: rgba(248, 113, 113, 0.12);
+            color: var(--danger);
+            border: 1px solid rgba(248, 113, 113, 0.3);
+        }
+        #success {
+            background: rgba(74, 222, 128, 0.12);
+            color: var(--primary);
+            border: 1px solid rgba(74, 222, 128, 0.3);
+        }
+
+        /* Toast for transient messages (haptic feedback confirmation, etc.) */
+        #toast {
+            position: fixed;
+            left: 50%;
+            bottom: calc(20px + var(--safe-bottom));
+            transform: translateX(-50%);
+            background: var(--bg-card);
+            color: var(--text);
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            z-index: 1000;
+            max-width: 90%;
+            text-align: center;
+        }
+
+        .connection-banner {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .hidden { display: none !important; }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* Reduced motion: disable transforms/animations */
+        @media (prefers-reduced-motion: reduce) {
+            button { transition: none; }
+            button:active { transform: none; }
+        }
+
+        /* Larger tap targets when used as touch device */
+        @media (pointer: coarse) {
+            button, input { min-height: 48px; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Stronghold</h1>
+        <header>
+            <h1>
+                <svg class="logo" viewBox="0 0 192 192" aria-hidden="true" focusable="false">
+                    <path d="M96 16 L168 44 L168 96 C168 138 136 168 96 176 C56 168 24 138 24 96 L24 44 Z"
+                          fill="#4ade80"/>
+                    <path d="M68 96 L88 116 L128 76"
+                          stroke="#0a0a0a" stroke-width="10" fill="none"
+                          stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Stronghold
+            </h1>
+            <div id="connection-banner" class="connection-banner" role="status" aria-live="polite">
+                <span class="status-dot disconnected" id="status-dot" aria-hidden="true"></span>
+                <span id="status-text">Not connected</span>
+            </div>
+        </header>
 
         <!-- Enrollment View -->
-        <div id="enroll-view">
-            <h2>Enroll Device</h2>
+        <main id="main-content">
+        <section id="enroll-view" aria-labelledby="enroll-heading">
+            <h2 id="enroll-heading">Enroll Device</h2>
             <div class="card">
-                <div class="label">Setup Password</div>
-                <input type="password" id="setup-password" placeholder="Enter setup password">
-                <div class="label">Device Name</div>
-                <input type="text" id="device-name" placeholder="e.g. iPhone 15 Pro" value="">
-                <button class="primary" id="enroll-btn">Enroll with Face ID</button>
-                <div id="error"></div>
-                <div id="success"></div>
+                <div class="label" for="setup-password">Setup Password</div>
+                <input type="password" id="setup-password"
+                       placeholder="Enter setup password"
+                       autocomplete="off"
+                       autocapitalize="none"
+                       autocorrect="off"
+                       aria-describedby="setup-password-help"
+                       aria-required="true">
+                <div class="info" id="setup-password-help">
+                    Provided by your Stronghold administrator.
+                </div>
+
+                <div class="label" for="device-name" style="margin-top:12px">Device Name</div>
+                <input type="text" id="device-name"
+                       placeholder="e.g. iPhone 15 Pro"
+                       autocomplete="off"
+                       autocapitalize="words"
+                       aria-describedby="device-name-help">
+                <div class="info" id="device-name-help">
+                    Used to identify this device when managing credentials.
+                </div>
+
+                <button class="primary" id="enroll-btn" aria-label="Enroll this device with Face ID or fingerprint">
+                    Enroll with Face ID
+                </button>
+                <div id="error" role="alert" aria-live="assertive"></div>
+                <div id="success" role="status" aria-live="polite"></div>
             </div>
 
             <h2>SEV-SNP Attestation</h2>
             <div class="card">
                 <div class="label">Gateway Measurement</div>
-                <div class="measurement" id="measurement">Loading...</div>
+                <div class="measurement" id="measurement" aria-live="polite" aria-label="Gateway attestation measurement">Loading...</div>
                 <div class="info">
                     Verify this matches the measurement in
                     <code>docs/MEASUREMENTS/v1.0.txt</code> before enrolling.
                 </div>
             </div>
-        </div>
+        </section>
 
         <!-- Sessions View (after enrollment) -->
-        <div id="sessions-view" class="hidden">
-            <h2>Active Sessions</h2>
-            <div id="sessions-list">
-                <!-- Sessions will be populated here -->
+        <section id="sessions-view" class="hidden" aria-labelledby="sessions-heading">
+            <h2 id="sessions-heading">Active Sessions</h2>
+            <div id="sessions-list" role="list" aria-label="Active compute sessions">
+                <div class="info" id="sessions-empty">No active sessions</div>
             </div>
 
-            <h2>Pending Approvals</h2>
-            <div id="pending-list">
-                <!-- Pending approval requests will be populated here -->
+            <h2 id="pending-heading">Pending Approvals</h2>
+            <div id="pending-list" role="list" aria-label="Pending session approval requests">
+                <div class="info" id="pending-empty">No pending approvals</div>
             </div>
-        </div>
+
+            <h2>Device</h2>
+            <div class="card">
+                <button class="secondary" id="unenroll-btn" aria-label="Sign out and clear device credentials on this phone">
+                    Sign Out / Unenroll
+                </button>
+            </div>
+        </section>
+        </main>
     </div>
 
+    <!-- Toast for transient messages -->
+    <div id="toast" role="status" aria-live="polite"></div>
+
     <script>
+        'use strict';
+
         // --- Configuration ---
         const GATEWAY_URL = window.location.origin;
         const PHONE_TOKEN = localStorage.getItem('stronghold_phone_token');
+        const SSE_HEARTBEAT_TIMEOUT_MS = 45000;  // expect a heartbeat every 30s; allow slack
 
         // --- WebAuthn helpers ---
-        async function generateChallenge() {
+        function generateChallenge() {
             const arr = new Uint8Array(32);
             crypto.getRandomValues(arr);
             return arr;
+        }
+
+        function bufferToBase64url(buffer) {
+            // WebAuthn idiomatic: base64url without padding
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
         function bufferToBase64(buffer) {
@@ -129,28 +403,73 @@
             return btoa(binary);
         }
 
-        function base64ToBuffer(base64) {
-            const binary = atob(base64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-            }
-            return bytes.buffer;
+        // --- Haptic feedback (no-op where unsupported) ---
+        function haptic(pattern) {
+            try {
+                if (navigator.vibrate) navigator.vibrate(pattern);
+            } catch (_) { /* silently ignore — Safari iOS < 14.5 lacks vibrate */ }
         }
 
-        // --- Enrollment ---
+        // --- UI helpers ---
+        function showError(msg) {
+            const el = document.getElementById('error');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 5000);
+        }
+
+        function showSuccess(msg) {
+            const el = document.getElementById('success');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 3000);
+        }
+
+        function showToast(msg, ms) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.style.display = 'block';
+            clearTimeout(showToast._t);
+            showToast._t = setTimeout(() => { el.style.display = 'none'; }, ms || 2000);
+        }
+
+        function updateConnectionStatus(state) {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            dot.className = 'status-dot ' + state;
+            const labels = {
+                connected: 'Live',
+                connecting: 'Reconnecting…',
+                disconnected: 'Offline',
+            };
+            text.textContent = labels[state] || state;
+        }
+
+        // --- Enrollment (W8-T1) ---
+        // Uses navigator.credentials.create() with platform authenticator and UV=required.
         async function enroll() {
+            const enrollBtn = document.getElementById('enroll-btn');
             const setupPassword = document.getElementById('setup-password').value;
             const deviceName = document.getElementById('device-name').value || 'Phone';
 
             if (!setupPassword) {
                 showError('Enter the setup password');
+                haptic(100);
                 return;
             }
 
+            // WebAuthn must be available; gate cleanly if not.
+            if (!window.PublicKeyCredential) {
+                showError('WebAuthn is not supported by this browser.');
+                return;
+            }
+
+            enrollBtn.disabled = true;
+            enrollBtn.setAttribute('aria-busy', 'true');
+            enrollBtn.textContent = 'Enrolling…';
+
             try {
-                // Generate WebAuthn credential
-                const challenge = await generateChallenge();
+                const challenge = generateChallenge();
                 const userId = new Uint8Array(16);
                 crypto.getRandomValues(userId);
 
@@ -170,8 +489,11 @@
                         authenticatorSelection: {
                             authenticatorAttachment: 'platform',
                             userVerification: 'required',
+                            residentKey: 'preferred',
+                            requireResidentKey: false,
                         },
                         timeout: 60000,
+                        attestation: 'none',
                     }
                 });
 
@@ -190,22 +512,35 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error(`Enrollment failed: ${response.status}`);
+                    const txt = await response.text().catch(() => '');
+                    throw new Error(`Enrollment failed (${response.status})${txt ? ': ' + txt : ''}`);
                 }
 
                 const data = await response.json();
                 localStorage.setItem('stronghold_phone_token', data.tenant_id);
-                showSuccess('Enrolled successfully! Tenant: ' + data.tenant_id);
+                haptic([10, 40, 10]);
+                showSuccess('Enrolled successfully. Tenant: ' + data.tenant_id);
                 showSessionsView();
             } catch (err) {
-                showError(err.message);
+                haptic(200);
+                if (err && err.name === 'NotAllowedError') {
+                    showError('Enrollment cancelled or timed out.');
+                } else {
+                    showError(err.message || String(err));
+                }
+            } finally {
+                enrollBtn.disabled = false;
+                enrollBtn.removeAttribute('aria-busy');
+                enrollBtn.textContent = 'Enroll with Face ID';
             }
         }
 
-        // --- Approval ---
+        // --- Approval flow (W8-T2) ---
+        // navigator.credentials.get() with userVerification: 'required'.
         async function approve(requestId) {
+            haptic(10);
             try {
-                const challenge = await generateChallenge();
+                const challenge = generateChallenge();
                 const assertion = await navigator.credentials.get({
                     publicKey: {
                         challenge: challenge,
@@ -233,16 +568,24 @@
                 });
 
                 if (response.ok) {
-                    showSuccess('Approved!');
+                    haptic([10, 30, 10]);
+                    showSuccess('Approved');
+                    removePendingCard(requestId);
                 } else {
-                    throw new Error('Approval failed');
+                    throw new Error(`Approval failed (${response.status})`);
                 }
             } catch (err) {
-                showError(err.message);
+                haptic(200);
+                if (err && err.name === 'NotAllowedError') {
+                    showError('Approval cancelled.');
+                } else {
+                    showError(err.message || String(err));
+                }
             }
         }
 
         async function deny(requestId) {
+            haptic(10);
             try {
                 const response = await fetch(`${GATEWAY_URL}/phone/decide`, {
                     method: 'POST',
@@ -258,16 +601,23 @@
                 });
 
                 if (response.ok) {
+                    haptic([10, 30, 10]);
                     showSuccess('Denied');
+                    removePendingCard(requestId);
+                } else {
+                    throw new Error(`Deny failed (${response.status})`);
                 }
             } catch (err) {
-                showError(err.message);
+                haptic(200);
+                showError(err.message || String(err));
             }
         }
 
-        // --- Revoke ---
+        // --- Revoke (W8-T4) ---
+        // Calls POST /phone/revoke with the machine_id, then removes the card.
         async function revoke(machineId) {
             if (!confirm('Revoke this session immediately?')) return;
+            haptic(10);
             try {
                 const response = await fetch(`${GATEWAY_URL}/phone/revoke`, {
                     method: 'POST',
@@ -279,94 +629,389 @@
                 });
 
                 if (response.ok) {
+                    haptic([10, 40, 10]);
                     showSuccess('Session revoked');
-                    loadSessions();
+                    markSessionRevoked(machineId);
+                } else {
+                    throw new Error(`Revoke failed (${response.status})`);
                 }
             } catch (err) {
-                showError(err.message);
+                haptic(200);
+                showError(err.message || String(err));
             }
+        }
+
+        // --- Unenroll (clears local token; server-side credential remains) ---
+        function unenroll() {
+            if (!confirm('Sign out and clear device credentials on this phone?')) return;
+            localStorage.removeItem('stronghold_phone_token');
+            haptic(20);
+            location.reload();
         }
 
         // --- Load attestation ---
         async function loadAttestation() {
             try {
                 const response = await fetch(`${GATEWAY_URL}/attestation`);
+                if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
-                document.getElementById('measurement').textContent = data.measurement || 'N/A';
+                const m = data.measurement || data.report?.measurement || 'N/A';
+                document.getElementById('measurement').textContent = m;
             } catch (err) {
                 document.getElementById('measurement').textContent = 'Failed to load';
             }
         }
 
-        // --- Load sessions ---
-        async function loadSessions() {
-            // TODO: fetch active sessions from gateway
-            // For now, show placeholder
-            document.getElementById('sessions-list').innerHTML = '<div class="info">No active sessions</div>';
+        // --- Sessions dashboard (W8-T4) ---
+        // There is no GET /phone/sessions endpoint yet; the dashboard is
+        // populated by SSE events (session_started / session_ended). Until
+        // the backend emits them, the empty-state message is shown.
+        function addSessionCard(session) {
+            const list = document.getElementById('sessions-list');
+            const empty = document.getElementById('sessions-empty');
+            if (empty) empty.remove();
+
+            const id = 'session-' + (session.machine_id || session.id);
+            if (document.getElementById(id)) return; // dedupe
+
+            const card = document.createElement('div');
+            card.className = 'card session-card';
+            card.id = id;
+            card.setAttribute('role', 'listitem');
+            card.setAttribute('aria-label', 'Session ' + (session.machine_id || session.id));
+
+            const ttl = session.ttl_secs ? formatTTL(session.ttl_secs) : '—';
+            const cpu = session.cpu || '—';
+            const mem = session.memory_gb ? (session.memory_gb + ' GB') : '—';
+            const lastCmd = session.last_command || '—';
+
+            card.innerHTML =
+                '<div class="label">Image</div>' +
+                '<div class="value">' + escapeHtml(session.image || '—') + '</div>' +
+                '<div class="label">Machine</div>' +
+                '<div class="value">' + escapeHtml(session.machine_id || session.id || '—') + '</div>' +
+                '<div class="label">TTL remaining · CPU · Memory</div>' +
+                '<div class="value">' + escapeHtml(ttl + ' · ' + cpu + ' vCPU · ' + mem) + '</div>' +
+                '<div class="label">Last command</div>' +
+                '<div class="value">' + escapeHtml(lastCmd) + '</div>' +
+                '<button class="danger" data-action="revoke" data-machine="' +
+                    escapeHtml(session.machine_id || session.id) + '" ' +
+                    'aria-label="Revoke session ' + escapeHtml(session.machine_id || session.id || '') + '">' +
+                    'Revoke' +
+                '</button>';
+
+            list.appendChild(card);
         }
 
-        // --- SSE for pending approvals ---
+        function markSessionRevoked(machineId) {
+            const card = document.getElementById('session-' + machineId);
+            if (!card) return;
+            card.classList.add('revoked');
+            const btn = card.querySelector('button[data-action="revoke"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.setAttribute('aria-disabled', 'true');
+                btn.textContent = 'Revoked';
+            }
+            // Remove after a short delay so the user sees the state change.
+            setTimeout(() => card.remove(), 1500);
+        }
+
+        function formatTTL(secs) {
+            if (secs <= 0) return 'expired';
+            const h = Math.floor(secs / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            if (h > 0) return h + 'h ' + m + 'm';
+            return m + 'm';
+        }
+
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // --- SSE for pending approvals + session updates (W8-T5) ---
+        // EventSource cannot send Authorization headers, so we use a
+        // fetch()-based streaming reader that parses SSE frames manually.
+        // Reconnect uses exponential backoff (1s → 30s capped) and a
+        // heartbeat watchdog triggers a reconnect if no bytes arrive
+        // within SSE_HEARTBEAT_TIMEOUT_MS.
+        let sseController = null;
+        let sseReconnectDelay = 1000;
+        let sseReconnectTimer = null;
+
         function connectSSE() {
             if (!PHONE_TOKEN) return;
-            const eventSource = new EventSource(`${GATEWAY_URL}/phone/pending`, {
-                withCredentials: true,
-            });
+            if (sseController) {
+                try { sseController.abort(); } catch (_) {}
+            }
+            const controller = new AbortController();
+            sseController = controller;
+            updateConnectionStatus('connecting');
 
-            eventSource.addEventListener('approval_request', (event) => {
-                const data = JSON.parse(event.data);
-                addPendingApproval(data);
-            });
+            (async () => {
+                try {
+                    const response = await fetch(`${GATEWAY_URL}/phone/pending`, {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${PHONE_TOKEN}`,
+                            'Accept': 'text/event-stream',
+                            'Cache-Control': 'no-cache',
+                        },
+                        signal: controller.signal,
+                    });
 
-            eventSource.onerror = () => {
-                setTimeout(connectSSE, 5000); // reconnect after 5s
-            };
+                    if (!response.ok) {
+                        throw new Error('SSE HTTP ' + response.status);
+                    }
+                    if (!response.body) {
+                        throw new Error('SSE: response.body unsupported');
+                    }
+
+                    // Successful connect: reset backoff
+                    sseReconnectDelay = 1000;
+                    updateConnectionStatus('connected');
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    let lastByteTime = Date.now();
+
+                    // Heartbeat watchdog — runs every 15s; reconnects if silent too long
+                    const watchdog = setInterval(() => {
+                        if (Date.now() - lastByteTime > SSE_HEARTBEAT_TIMEOUT_MS) {
+                            clearInterval(watchdog);
+                            try { reader.cancel('heartbeat-timeout'); } catch (_) {}
+                        }
+                    }, 15000);
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        lastByteTime = Date.now();
+                        buffer += decoder.decode(value, { stream: true });
+
+                        // SSE events are separated by a blank line.
+                        const frames = buffer.split('\n\n');
+                        buffer = frames.pop() || '';
+
+                        for (const frame of frames) {
+                            handleSSEFrame(frame);
+                        }
+                    }
+
+                    clearInterval(watchdog);
+                    updateConnectionStatus('disconnected');
+                } catch (err) {
+                    if (err && err.name === 'AbortError') return; // intentional
+                    console.warn('SSE error:', err);
+                    updateConnectionStatus('connecting');
+                }
+
+                // Schedule reconnect with exponential backoff
+                sseReconnectDelay = Math.min(sseReconnectDelay * 2, 30000);
+                sseReconnectTimer = setTimeout(connectSSE, sseReconnectDelay);
+            })();
+        }
+
+        function disconnectSSE() {
+            if (sseController) {
+                try { sseController.abort(); } catch (_) {}
+                sseController = null;
+            }
+            if (sseReconnectTimer) {
+                clearTimeout(sseReconnectTimer);
+                sseReconnectTimer = null;
+            }
+        }
+
+        function handleSSEFrame(frame) {
+            let eventType = '';
+            let dataStr = '';
+
+            for (const rawLine of frame.split('\n')) {
+                const line = rawLine.replace(/\r$/, '');
+                if (line.startsWith(':')) continue;     // comment / heartbeat
+                if (line.startsWith('event:')) {
+                    eventType = line.slice(6).trim();
+                } else if (line.startsWith('data:')) {
+                    dataStr += line.slice(5).replace(/^ /, '') + '\n';
+                }
+            }
+
+            // Heartbeat frames (data: heartbeat) — just keep the connection alive
+            if (!dataStr && !eventType) return;
+            if (dataStr.trim() === 'heartbeat') return;
+
+            if (!dataStr) return;
+            const dataStrTrimmed = dataStr.replace(/\n$/, '');
+
+            let data;
+            try {
+                data = JSON.parse(dataStrTrimmed);
+            } catch (_) {
+                // Non-JSON payload — ignore.
+                return;
+            }
+
+            const type = eventType || 'message';
+            switch (type) {
+                case 'approval_request':
+                    addPendingApproval(data);
+                    break;
+                case 'session_started':
+                case 'session_updated':
+                    addSessionCard(data);
+                    break;
+                case 'session_ended':
+                case 'session_revoked':
+                    if (data.machine_id || data.id) {
+                        markSessionRevoked(data.machine_id || data.id);
+                    }
+                    break;
+                case 'anomaly':
+                    addAnomalyAlert(data);
+                    break;
+                default:
+                    console.debug('SSE event', type, data);
+            }
         }
 
         function addPendingApproval(data) {
             const list = document.getElementById('pending-list');
+            const empty = document.getElementById('pending-empty');
+            if (empty) empty.remove();
+
+            const id = 'pending-' + (data.request_id || '');
+            if (document.getElementById(id)) return;
+
             const card = document.createElement('div');
-            card.className = 'card session-card';
-            card.innerHTML = `
-                <div class="label">Session Request</div>
-                <div class="value">Image: ${data.image || 'N/A'}</div>
-                <div class="value">TTL: ${data.ttl_secs || 'N/A'}s</div>
-                <div class="value">Reason: ${data.reason || 'N/A'}</div>
-                <button class="primary" onclick="approve('${data.request_id}')">Approve</button>
-                <button class="danger" onclick="deny('${data.request_id}')">Deny</button>
-            `;
+            card.className = 'card session-card pending';
+            card.id = id;
+            card.setAttribute('role', 'listitem');
+            card.setAttribute('aria-label', 'Pending approval request ' + (data.request_id || ''));
+
+            card.innerHTML =
+                '<div class="label">Session Request</div>' +
+                '<div class="value">Image: ' + escapeHtml(data.image || 'N/A') + '</div>' +
+                '<div class="value">TTL: ' + escapeHtml(data.ttl_secs ? formatTTL(data.ttl_secs) : 'N/A') + '</div>' +
+                '<div class="value">Reason: ' + escapeHtml(data.reason || 'N/A') + '</div>' +
+                '<div class="btn-row">' +
+                  '<button class="primary" data-action="approve" data-id="' +
+                    escapeHtml(data.request_id || '') + '" ' +
+                    'aria-label="Approve session request ' + escapeHtml(data.request_id || '') + '">' +
+                    'Approve' +
+                  '</button>' +
+                  '<button class="danger" data-action="deny" data-id="' +
+                    escapeHtml(data.request_id || '') + '" ' +
+                    'aria-label="Deny session request ' + escapeHtml(data.request_id || '') + '">' +
+                    'Deny' +
+                  '</button>' +
+                '</div>';
+
             list.appendChild(card);
+            haptic([10, 30, 10]);
+            showToast('New approval request');
+        }
+
+        function removePendingCard(requestId) {
+            const card = document.getElementById('pending-' + requestId);
+            if (!card) return;
+            card.remove();
+            // Restore empty-state if list is now empty
+            const list = document.getElementById('pending-list');
+            if (!list.children.length) {
+                const empty = document.createElement('div');
+                empty.className = 'info';
+                empty.id = 'pending-empty';
+                empty.textContent = 'No pending approvals';
+                list.appendChild(empty);
+            }
+        }
+
+        function addAnomalyAlert(data) {
+            // Anomalies show as a session card with anomaly styling + Revoke button
+            const session = {
+                machine_id: data.machine_id || data.session_id,
+                image: data.image || 'unknown',
+                ttl_secs: data.ttl_secs,
+                cpu: data.cpu,
+                memory_gb: data.memory_gb,
+                last_command: data.command || data.last_command || 'anomalous activity',
+            };
+            addSessionCard(session);
+            const card = document.getElementById('session-' + session.machine_id);
+            if (card) {
+                card.classList.add('anomaly');
+                card.setAttribute('aria-label', 'Anomaly detected on session ' + session.machine_id);
+            }
+            haptic([50, 50, 50]);
+            showToast('⚠ Anomaly detected');
         }
 
         // --- View switching ---
         function showSessionsView() {
             document.getElementById('enroll-view').classList.add('hidden');
             document.getElementById('sessions-view').classList.remove('hidden');
-            loadSessions();
             connectSSE();
         }
 
-        // --- Helpers ---
-        function showError(msg) {
-            const el = document.getElementById('error');
-            el.textContent = msg;
-            el.style.display = 'block';
-            setTimeout(() => el.style.display = 'none', 5000);
+        function showEnrollView() {
+            document.getElementById('sessions-view').classList.add('hidden');
+            document.getElementById('enroll-view').classList.remove('hidden');
         }
 
-        function showSuccess(msg) {
-            const el = document.getElementById('success');
-            el.textContent = msg;
-            el.style.display = 'block';
-            setTimeout(() => el.style.display = 'none', 3000);
+        // --- Event delegation for dynamic buttons ---
+        // Pending approvals and session cards are added dynamically; we use
+        // one click listener with data-action attributes instead of inline
+        // onclick handlers (also satisfies CSP best practices).
+        document.addEventListener('click', (event) => {
+            const btn = event.target.closest('button[data-action]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            const id = btn.getAttribute('data-id');
+            const machine = btn.getAttribute('data-machine');
+            if (action === 'approve' && id) approve(id);
+            else if (action === 'deny' && id) deny(id);
+            else if (action === 'revoke' && machine) revoke(machine);
+        });
+
+        // --- Service worker registration (W8-T6) ---
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker
+                    .register('/static/sw.js', { scope: '/static/' })
+                    .then((reg) => {
+                        console.debug('SW registered with scope:', reg.scope);
+                    })
+                    .catch((err) => {
+                        console.warn('SW registration failed:', err);
+                    });
+            });
         }
 
         // --- Init ---
         document.getElementById('enroll-btn').addEventListener('click', enroll);
+        document.getElementById('unenroll-btn').addEventListener('click', unenroll);
         loadAttestation();
 
         if (PHONE_TOKEN) {
             showSessionsView();
         }
+
+        // Online/offline indicator
+        window.addEventListener('online', () => {
+            showToast('Back online');
+            if (PHONE_TOKEN) connectSSE();
+        });
+        window.addEventListener('offline', () => {
+            updateConnectionStatus('disconnected');
+            showToast('Offline — changes will sync when reconnected');
+        });
     </script>
 </body>
 </html>
