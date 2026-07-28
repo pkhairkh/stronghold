@@ -37,5 +37,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/fullstack"
-org.opencontainers.image.description = "Fullstack web development with Node, Postgres, Redis, Prisma"
+"org.opencontainers.image.title" = "stronghold/fullstack"
+"org.opencontainers.image.description" = "Fullstack web development with Node, Postgres, Redis, Prisma"

@@ -31,5 +31,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/go-cli"
-org.opencontainers.image.description = "Go 1.22 for CLI and server development"
+"org.opencontainers.image.title" = "stronghold/go-cli"
+"org.opencontainers.image.description" = "Go 1.22 for CLI and server development"

@@ -52,5 +52,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/rust-nightly"
-org.opencontainers.image.description = "Rust nightly + Lean 4 for systems programming and formal proofs"
+"org.opencontainers.image.title" = "stronghold/rust-nightly"
+"org.opencontainers.image.description" = "Rust nightly + Lean 4 for systems programming and formal proofs"

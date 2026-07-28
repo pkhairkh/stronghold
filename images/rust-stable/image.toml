@@ -37,5 +37,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/rust-stable"
-org.opencontainers.image.description = "Stable Rust for production builds"
+"org.opencontainers.image.title" = "stronghold/rust-stable"
+"org.opencontainers.image.description" = "Stable Rust for production builds"

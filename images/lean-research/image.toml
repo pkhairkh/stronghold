@@ -34,5 +34,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/lean-research"
-org.opencontainers.image.description = "Lean 4 for formal mathematics and verified software"
+"org.opencontainers.image.title" = "stronghold/lean-research"
+"org.opencontainers.image.description" = "Lean 4 for formal mathematics and verified software"

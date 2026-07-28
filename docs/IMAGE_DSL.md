@@ -157,11 +157,16 @@ These are inserted verbatim into the generated Containerfile, after all other di
 
 ```toml
 [labels]
-org.opencontainers.image.title = "stronghold/rust-nightly"
-org.opencontainers.image.description = "Rust nightly + Lean 4"
-org.opencontainers.image.licenses = "MIT"
-org.opencontainers.image.source = "https://github.com/pkhairkh/stronghold"
+"org.opencontainers.image.title" = "stronghold/rust-nightly"
+"org.opencontainers.image.description" = "Rust nightly + Lean 4"
+"org.opencontainers.image.licenses" = "MIT"
+"org.opencontainers.image.source" = "https://github.com/pkhairkh/stronghold"
 ```
+
+Note: dotted OCI label keys must be quoted in TOML — otherwise the parser
+treats them as nested tables (`org.opencontainers.image.title = ...` would
+deserialize as `{ org: { opencontainers: { image: { title: ... } } } }`
+rather than a flat string-keyed map).
 
 ---
 
@@ -207,8 +212,8 @@ snippets = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/rust-nightly"
-org.opencontainers.image.description = "Rust nightly + Lean 4 for systems programming"
+"org.opencontainers.image.title" = "stronghold/rust-nightly"
+"org.opencontainers.image.description" = "Rust nightly + Lean 4 for systems programming"
 ```
 
 ---

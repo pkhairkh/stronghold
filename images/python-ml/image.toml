@@ -37,5 +37,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/python-ml"
-org.opencontainers.image.description = "Python 3.12 + PyTorch + CUDA for ML research"
+"org.opencontainers.image.title" = "stronghold/python-ml"
+"org.opencontainers.image.description" = "Python 3.12 + PyTorch + CUDA for ML research"

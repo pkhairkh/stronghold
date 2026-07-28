@@ -33,5 +33,5 @@ commands = [
 ]
 
 [labels]
-org.opencontainers.image.title = "stronghold/node-20"
-org.opencontainers.image.description = "Node.js 20 LTS + pnpm for web development"
+"org.opencontainers.image.title" = "stronghold/node-20"
+"org.opencontainers.image.description" = "Node.js 20 LTS + pnpm for web development"
