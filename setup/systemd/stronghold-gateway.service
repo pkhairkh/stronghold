@@ -1,0 +1,38 @@
+[Unit]
+Description=Stronghold Gateway Control Plane
+After=network-online.target ntfy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/stronghold-gateway serve --bind 0.0.0.0:8443
+Environment=STRONGHOLD_DATA_DIR=/var/lib/stronghold
+Environment=STRONGHOLD_CONFIG=/etc/stronghold/config.toml
+Environment=STRONGHOLD_NTFY_URL=http://localhost:8090
+Environment=RUST_LOG=stronghold_gateway=info,tower_http=info
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+LimitNPROC=65536
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/stronghold /etc/stronghold
+PrivateTmp=true
+PrivateDevices=false  # needs /dev/sev for SEV-SNP
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false  # JIT needed by some crypto libs
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

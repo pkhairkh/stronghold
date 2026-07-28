@@ -1,0 +1,15 @@
+[Unit]
+Description=k3s Worker Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/k3s agent
+Environment=K3S_URL=https://{{CONTROL_PLANE_IP}}:6443
+Environment=K3S_TOKEN={{K3S_TOKEN}}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

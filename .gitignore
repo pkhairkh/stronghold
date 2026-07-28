@@ -1,0 +1,45 @@
+# --- Rust ---
+/target
+**/*.rs.bk
+Cargo.lock
+*.pdb
+
+# --- SEV-SNP ---
+*.sev
+/dev/sev
+
+# --- Keys (never commit) ---
+*.key
+*.pem
+!docs/examples/*.pem
+credentials.db
+audit/
+/keys/
+
+# --- Runtime ---
+/stronghold-gateway
+/stronghold-cli
+*.log
+*.pid
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Environment ---
+.env
+.env.*
+!.env.example
+
+# --- Build artifacts ---
+dist/
+*.tar.gz
+*.zip
+
+# --- ntfy cache ---
+ntfy-cache/
+ntfy-attachments/

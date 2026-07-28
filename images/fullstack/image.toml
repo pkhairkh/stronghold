@@ -1,0 +1,41 @@
+# Stronghold Fullstack Image
+#
+# Extends rocky-base with Node.js 20, pnpm, Postgres client, Redis client,
+# and Prisma. For Next.js / Remix / fullstack web development.
+
+name = "fullstack"
+extends = "rocky-base"
+description = "Rocky 9 + Node 20 + pnpm + Postgres + Redis + Prisma"
+
+[packages]
+dnf = [
+    "postgresql",
+    "redis",
+    "gcc",
+    "gcc-c++",
+    "make",
+]
+
+[toolchains.node]
+version = "20.11.1"
+
+[env]
+NODE_ENV = "development"
+DATABASE_URL = "postgres://localhost:5432/dev"
+REDIS_URL = "redis://localhost:6379"
+
+[pre_install]
+commands = [
+    "curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -",
+]
+
+[post_install]
+commands = [
+    "npm install -g pnpm@9 prisma@latest",
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/fullstack"
+org.opencontainers.image.description = "Fullstack web development with Node, Postgres, Redis, Prisma"

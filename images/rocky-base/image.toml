@@ -1,0 +1,74 @@
+# Stronghold Rocky Base Image
+#
+# This is the universal root for all Stronghold images. Every other image
+# in the catalog `extends` from this one.
+#
+# Built on Rocky Linux 9 minimal — RHEL-compatible ABI, 10-year support
+# lifecycle, dnf5 package manager.
+
+name = "rocky-base"
+extends = ""  # root image — no parent
+description = "Rocky Linux 9 minimal base with essential dev tools"
+
+[packages]
+dnf = [
+    "dnf5",
+    "git",
+    "curl",
+    "wget",
+    "openssh-clients",
+    "rsync",
+    "jq",
+    "httpie",
+    "vim",
+    "helix",
+    "tmux",
+    "htop",
+    "btop",
+    "fish",
+    "bash",
+    "sudo",
+    "procps-ng",
+    "findutils",
+    "ripgrep",
+    "fd-find",
+    "tree",
+    "less",
+    "man-db",
+    "ca-certificates",
+    "tzdata",
+]
+apt = []  # alias for dnf on rocky; ignored
+
+[env]
+HOME = "/home/dev"
+PATH = "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin"
+LANG = "en_US.UTF-8"
+LC_ALL = "en_US.UTF-8"
+TZ = "UTC"
+EDITOR = "helix"
+SHELL = "/usr/bin/fish"
+
+[post_install]
+commands = [
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+    "useradd -m -s /usr/bin/fish -u 1000 dev",
+    "echo 'dev ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/dev",
+    "mkdir -p /home/dev/work /home/dev/.cache",
+    "chown -R dev:dev /home/dev",
+]
+
+[inject_containerfile]
+snippets = [
+    "USER dev",
+    "WORKDIR /home/dev/work",
+    "VOLUME [\"/home/dev/work\", \"/home/dev/.cache\"]",
+    "CMD [\"fish\"]",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/rocky-base"
+org.opencontainers.image.description = "Rocky Linux 9 minimal base for Stronghold agent workspaces"
+org.opencontainers.image.licenses = "Apache-2.0"
+org.opencontainers.image.source = "https://github.com/pkhairkh/stronghold"

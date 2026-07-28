@@ -1,0 +1,37 @@
+# Stronghold Node 20 Image
+#
+# Extends rocky-base with Node.js 20 LTS and pnpm.
+
+name = "node-20"
+extends = "rocky-base"
+description = "Rocky 9 + Node.js 20 LTS + pnpm"
+
+[packages]
+dnf = [
+    "gcc",
+    "gcc-c++",
+    "make",
+]
+
+[toolchains.node]
+version = "20.11.1"
+
+[env]
+NODE_ENV = "development"
+COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+
+[pre_install]
+commands = [
+    "curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -",
+]
+
+[post_install]
+commands = [
+    "npm install -g pnpm@9",
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/node-20"
+org.opencontainers.image.description = "Node.js 20 LTS + pnpm for web development"

@@ -1,0 +1,41 @@
+# Stronghold Rust Stable Image
+#
+# Extends rocky-base with stable Rust toolchain and common targets.
+
+name = "rust-stable"
+extends = "rocky-base"
+description = "Rocky 9 + Rust stable + common targets"
+
+[packages]
+dnf = [
+    "openssl-devel",
+    "cmake",
+    "make",
+    "gcc",
+    "gcc-c++",
+    "pkgconf-pkg-config",
+]
+
+[toolchains.rust]
+channel = "stable"
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-wasip2",
+]
+components = ["rust-src", "rustfmt", "clippy"]
+
+[env]
+CARGO_TARGET_DIR = "{home}/target"
+RUSTFLAGS = "-C target-cpu=native"
+RUST_BACKTRACE = "1"
+
+[post_install]
+commands = [
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/rust-stable"
+org.opencontainers.image.description = "Stable Rust for production builds"

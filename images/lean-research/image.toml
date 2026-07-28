@@ -1,0 +1,38 @@
+# Stronghold Lean Research Image
+#
+# Extends rocky-base with Lean 4 (via elan) for formal proofs.
+
+name = "lean-research"
+extends = "rocky-base"
+description = "Rocky 9 + Lean 4 + lake for formal proofs"
+
+[packages]
+dnf = [
+    "libgmp-devel",
+    "cmake",
+    "make",
+    "gcc",
+    "gcc-c++",
+]
+
+[toolchains.elan]
+channel = "leanprover/lean4:stable"
+date = "2026-02-15"
+
+[env]
+LEAN_PATH = "{home}/.elan/lib"
+
+[pre_install]
+commands = [
+    "curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none",
+]
+
+[post_install]
+commands = [
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/lean-research"
+org.opencontainers.image.description = "Lean 4 for formal mathematics and verified software"

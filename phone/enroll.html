@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Stronghold</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        .container { max-width: 500px; width: 100%; }
+        h1 { font-size: 1.8rem; margin-bottom: 8px; color: #fff; }
+        h2 { font-size: 1.2rem; margin: 24px 0 12px; color: #aaa; }
+        .card {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+        .session-card {
+            border-left: 3px solid #4ade80;
+        }
+        .session-card.anomaly { border-left-color: #fbbf24; }
+        .session-card.revoked { border-left-color: #f87171; opacity: 0.6; }
+        input, button {
+            width: 100%;
+            padding: 14px;
+            border-radius: 10px;
+            border: 1px solid #333;
+            background: #111;
+            color: #e0e0e0;
+            font-size: 16px;
+            margin-bottom: 12px;
+        }
+        button {
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        button.primary { background: #4ade80; color: #0a0a0a; border: none; }
+        button.primary:active { background: #22c55e; }
+        button.danger { background: #f87171; color: #0a0a0a; border: none; }
+        button.danger:active { background: #ef4444; }
+        button.secondary { background: #2a2a2a; color: #e0e0e0; }
+        .info { font-size: 0.85rem; color: #888; margin-top: 8px; }
+        .label { font-size: 0.8rem; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+        .value { font-size: 0.95rem; color: #ccc; margin-bottom: 12px; word-break: break-all; }
+        .measurement { font-family: monospace; font-size: 0.75rem; color: #4ade80; word-break: break-all; }
+        .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .status-dot.active { background: #4ade80; }
+        .status-dot.pending { background: #fbbf24; }
+        .status-dot.revoked { background: #f87171; }
+        #error { color: #f87171; font-size: 0.9rem; margin-top: 8px; display: none; }
+        #success { color: #4ade80; font-size: 0.9rem; margin-top: 8px; display: none; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stronghold</h1>
+
+        <!-- Enrollment View -->
+        <div id="enroll-view">
+            <h2>Enroll Device</h2>
+            <div class="card">
+                <div class="label">Setup Password</div>
+                <input type="password" id="setup-password" placeholder="Enter setup password">
+                <div class="label">Device Name</div>
+                <input type="text" id="device-name" placeholder="e.g. iPhone 15 Pro" value="">
+                <button class="primary" id="enroll-btn">Enroll with Face ID</button>
+                <div id="error"></div>
+                <div id="success"></div>
+            </div>
+
+            <h2>SEV-SNP Attestation</h2>
+            <div class="card">
+                <div class="label">Gateway Measurement</div>
+                <div class="measurement" id="measurement">Loading...</div>
+                <div class="info">
+                    Verify this matches the measurement in
+                    <code>docs/MEASUREMENTS/v1.0.txt</code> before enrolling.
+                </div>
+            </div>
+        </div>
+
+        <!-- Sessions View (after enrollment) -->
+        <div id="sessions-view" class="hidden">
+            <h2>Active Sessions</h2>
+            <div id="sessions-list">
+                <!-- Sessions will be populated here -->
+            </div>
+
+            <h2>Pending Approvals</h2>
+            <div id="pending-list">
+                <!-- Pending approval requests will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const GATEWAY_URL = window.location.origin;
+        const PHONE_TOKEN = localStorage.getItem('stronghold_phone_token');
+
+        // --- WebAuthn helpers ---
+        async function generateChallenge() {
+            const arr = new Uint8Array(32);
+            crypto.getRandomValues(arr);
+            return arr;
+        }
+
+        function bufferToBase64(buffer) {
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+
+        function base64ToBuffer(base64) {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // --- Enrollment ---
+        async function enroll() {
+            const setupPassword = document.getElementById('setup-password').value;
+            const deviceName = document.getElementById('device-name').value || 'Phone';
+
+            if (!setupPassword) {
+                showError('Enter the setup password');
+                return;
+            }
+
+            try {
+                // Generate WebAuthn credential
+                const challenge = await generateChallenge();
+                const userId = new Uint8Array(16);
+                crypto.getRandomValues(userId);
+
+                const credential = await navigator.credentials.create({
+                    publicKey: {
+                        challenge: challenge,
+                        rp: { name: 'Stronghold' },
+                        user: {
+                            id: userId,
+                            name: deviceName,
+                            displayName: deviceName,
+                        },
+                        pubKeyCredParams: [
+                            { type: 'public-key', alg: -7 },   // ES256
+                            { type: 'public-key', alg: -257 }, // RS256
+                        ],
+                        authenticatorSelection: {
+                            authenticatorAttachment: 'platform',
+                            userVerification: 'required',
+                        },
+                        timeout: 60000,
+                    }
+                });
+
+                // Send to gateway
+                const response = await fetch(`${GATEWAY_URL}/phone/enroll`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        setup_password: setupPassword,
+                        credential_id: bufferToBase64(credential.rawId),
+                        public_key: bufferToBase64(credential.response.getPublicKey()),
+                        aaguid: '0000-0000-0000-0000',
+                        transports: Array.from(credential.response.getTransports() || []),
+                        name: deviceName,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Enrollment failed: ${response.status}`);
+                }
+
+                const data = await response.json();
+                localStorage.setItem('stronghold_phone_token', data.tenant_id);
+                showSuccess('Enrolled successfully! Tenant: ' + data.tenant_id);
+                showSessionsView();
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        // --- Approval ---
+        async function approve(requestId) {
+            try {
+                const challenge = await generateChallenge();
+                const assertion = await navigator.credentials.get({
+                    publicKey: {
+                        challenge: challenge,
+                        userVerification: 'required',
+                        timeout: 60000,
+                    }
+                });
+
+                const response = await fetch(`${GATEWAY_URL}/phone/decide`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${PHONE_TOKEN}`,
+                    },
+                    body: JSON.stringify({
+                        request_id: requestId,
+                        decision: 'approve',
+                        assertion: {
+                            credential_id: bufferToBase64(assertion.rawId),
+                            authenticator_data: bufferToBase64(assertion.response.authenticatorData),
+                            client_data_json: bufferToBase64(assertion.response.clientDataJSON),
+                            signature: bufferToBase64(assertion.response.signature),
+                        },
+                    }),
+                });
+
+                if (response.ok) {
+                    showSuccess('Approved!');
+                } else {
+                    throw new Error('Approval failed');
+                }
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        async function deny(requestId) {
+            try {
+                const response = await fetch(`${GATEWAY_URL}/phone/decide`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${PHONE_TOKEN}`,
+                    },
+                    body: JSON.stringify({
+                        request_id: requestId,
+                        decision: 'deny',
+                        assertion: null,
+                    }),
+                });
+
+                if (response.ok) {
+                    showSuccess('Denied');
+                }
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        // --- Revoke ---
+        async function revoke(machineId) {
+            if (!confirm('Revoke this session immediately?')) return;
+            try {
+                const response = await fetch(`${GATEWAY_URL}/phone/revoke`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${PHONE_TOKEN}`,
+                    },
+                    body: JSON.stringify({ machine_id: machineId }),
+                });
+
+                if (response.ok) {
+                    showSuccess('Session revoked');
+                    loadSessions();
+                }
+            } catch (err) {
+                showError(err.message);
+            }
+        }
+
+        // --- Load attestation ---
+        async function loadAttestation() {
+            try {
+                const response = await fetch(`${GATEWAY_URL}/attestation`);
+                const data = await response.json();
+                document.getElementById('measurement').textContent = data.measurement || 'N/A';
+            } catch (err) {
+                document.getElementById('measurement').textContent = 'Failed to load';
+            }
+        }
+
+        // --- Load sessions ---
+        async function loadSessions() {
+            // TODO: fetch active sessions from gateway
+            // For now, show placeholder
+            document.getElementById('sessions-list').innerHTML = '<div class="info">No active sessions</div>';
+        }
+
+        // --- SSE for pending approvals ---
+        function connectSSE() {
+            if (!PHONE_TOKEN) return;
+            const eventSource = new EventSource(`${GATEWAY_URL}/phone/pending`, {
+                withCredentials: true,
+            });
+
+            eventSource.addEventListener('approval_request', (event) => {
+                const data = JSON.parse(event.data);
+                addPendingApproval(data);
+            });
+
+            eventSource.onerror = () => {
+                setTimeout(connectSSE, 5000); // reconnect after 5s
+            };
+        }
+
+        function addPendingApproval(data) {
+            const list = document.getElementById('pending-list');
+            const card = document.createElement('div');
+            card.className = 'card session-card';
+            card.innerHTML = `
+                <div class="label">Session Request</div>
+                <div class="value">Image: ${data.image || 'N/A'}</div>
+                <div class="value">TTL: ${data.ttl_secs || 'N/A'}s</div>
+                <div class="value">Reason: ${data.reason || 'N/A'}</div>
+                <button class="primary" onclick="approve('${data.request_id}')">Approve</button>
+                <button class="danger" onclick="deny('${data.request_id}')">Deny</button>
+            `;
+            list.appendChild(card);
+        }
+
+        // --- View switching ---
+        function showSessionsView() {
+            document.getElementById('enroll-view').classList.add('hidden');
+            document.getElementById('sessions-view').classList.remove('hidden');
+            loadSessions();
+            connectSSE();
+        }
+
+        // --- Helpers ---
+        function showError(msg) {
+            const el = document.getElementById('error');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => el.style.display = 'none', 5000);
+        }
+
+        function showSuccess(msg) {
+            const el = document.getElementById('success');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => el.style.display = 'none', 3000);
+        }
+
+        // --- Init ---
+        document.getElementById('enroll-btn').addEventListener('click', enroll);
+        loadAttestation();
+
+        if (PHONE_TOKEN) {
+            showSessionsView();
+        }
+    </script>
+</body>
+</html>

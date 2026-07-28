@@ -1,0 +1,16 @@
+sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+# This is a placeholder measurement for the scaffold release.
+# The actual measurement will be generated when the gateway binary
+# is first built and run inside an SEV-SNP guest.
+#
+# To generate the real measurement:
+#   1. Build the gateway: cargo build --release --features sev-snp
+#   2. Boot inside an SEV-SNP-capable Vultr VM
+#   3. Run: stronghold-gateway attestation
+#   4. Copy the "measurement" field here
+#   5. Sign this file with the Stronghold release GPG key:
+#      gpg --detach-sign --armor v1.0.txt
+#
+# Tenants should verify this measurement matches their gateway's
+# /attestation endpoint before enrolling any credentials.

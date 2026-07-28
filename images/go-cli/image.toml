@@ -1,0 +1,35 @@
+# Stronghold Go CLI Image
+#
+# Extends rocky-base with Go 1.22 for CLI development.
+
+name = "go-cli"
+extends = "rocky-base"
+description = "Rocky 9 + Go 1.22 for CLI development"
+
+[packages]
+dnf = [
+    "gcc",
+    "make",
+]
+
+[toolchains.go]
+version = "1.22.2"
+
+[env]
+GOPATH = "{home}/go"
+GOBIN = "{home}/go/bin"
+GOPROXY = "https://proxy.golang.org,direct"
+
+[pre_install]
+commands = [
+    "curl -fsSL https://go.dev/dl/go1.22.2.linux-amd64.tar.gz | tar -C /usr/local -xz",
+]
+
+[post_install]
+commands = [
+    "sudo dnf clean all",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/go-cli"
+org.opencontainers.image.description = "Go 1.22 for CLI and server development"

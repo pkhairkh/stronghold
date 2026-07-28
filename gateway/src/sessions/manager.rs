@@ -1,0 +1,337 @@
+//! Session manager — create, approve, deny, revoke, extend sessions.
+
+use anyhow::Result;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::params;
+use std::time::Duration;
+use tokio::time::timeout;
+
+use crate::routes::agent::{OrderRequest, OrderResponse, ExtendRequest};
+use crate::routes::AppState;
+use crate::routes::OrderResponse as SessResponse;
+
+/// Error types for session operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("session not found")]
+    NotFound,
+    #[error("session expired")]
+    Expired,
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("pool error: {0}")]
+    Pool(#[from] r2d2::Error),
+}
+
+/// The decision returned from `wait_for_decision`.
+pub enum Decision {
+    Approved,
+    Denied,
+    Timeout,
+}
+
+/// Create a pending session (before phone approval).
+pub fn create_pending(
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
+    req: &OrderRequest,
+) -> Result<String> {
+    let session_id = format!("sess_{}", ulid::Ulid::new());
+    let conn = db.get()?;
+
+    conn.execute(
+        "INSERT INTO pending_sessions
+         (id, tenant_id, image, ttl_secs, reason, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', datetime('now'))",
+        params![session_id, tenant_id, req.image, req.ttl_secs, req.reason],
+    )?;
+
+    Ok(session_id)
+}
+
+/// Wait for the tenant's phone decision (long-poll, 60s timeout).
+pub async fn wait_for_decision(
+    db: &Pool<SqliteConnectionManager>,
+    session_id: &str,
+    timeout_secs: u64,
+) -> Result<Decision> {
+    let deadline = Duration::from_secs(timeout_secs);
+
+    let result = timeout(deadline, async {
+        loop {
+            let decision = check_decision(db, session_id)?;
+            if let Some(d) = decision {
+                return Ok(d);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(d)) => Ok(d),
+        Ok(Err(e)) => Err(anyhow::anyhow!("Database error: {}", e)),
+        Err(_) => Ok(Decision::Timeout),
+    }
+}
+
+fn check_decision(
+    db: &Pool<SqliteConnectionManager>,
+    session_id: &str,
+) -> Result<Option<Decision>> {
+    let conn = db.get()?;
+    let status: String = conn.query_row(
+        "SELECT status FROM pending_sessions WHERE id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+
+    match status.as_str() {
+        "approved" => Ok(Some(Decision::Approved)),
+        "denied" => Ok(Some(Decision::Denied)),
+        _ => Ok(None),
+    }
+}
+
+/// Mark a session as approved (called after WebAuthn verification).
+pub fn approve_session(
+    db: &Pool<SqliteConnectionManager>,
+    session_id: &str,
+) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute(
+        "UPDATE pending_sessions SET status = 'approved', decided_at = datetime('now') WHERE id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// Mark a session as denied.
+pub fn deny_session(
+    db: &Pool<SqliteConnectionManager>,
+    session_id: &str,
+) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute(
+        "UPDATE pending_sessions SET status = 'denied', decided_at = datetime('now') WHERE id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// Finalize an approved session — schedule the pod and return the connect token.
+pub async fn finalize_session(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: &str,
+    req: &OrderRequest,
+) -> Result<OrderResponse> {
+    // Schedule the pod on a worker
+    let machine = crate::machines::scheduler::schedule(
+        state, tenant_id, req,
+    ).await?;
+
+    // Generate connect token
+    let connect_token = format!("stronghold_sess_{}", ulid::Ulid::new());
+
+    // Record in machines table
+    let conn = state.db.get()?;
+    conn.execute(
+        "INSERT INTO machines
+         (id, tenant_id, image, worker, status, cpu, memory_gb, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, datetime('now'),
+                 datetime('now', '+' || ?7 || ' seconds'))",
+        params![
+            machine.id,
+            tenant_id,
+            req.image,
+            machine.worker,
+            req.compute.cpu.unwrap_or(4),
+            req.compute.memory_gb.unwrap_or(8),
+            req.ttl_secs,
+        ],
+    )?;
+
+    // Log to audit
+    crate::audit::log::entry(
+        &state.db, tenant_id, &machine.id, "session_started",
+        serde_json::json!({
+            "session_id": session_id,
+            "image": req.image,
+            "ttl_secs": req.ttl_secs,
+            "reason": req.reason,
+        }),
+        &state.audit_keys,
+    )?;
+
+    Ok(OrderResponse {
+        machine_id: machine.id.clone(),
+        connect_token,
+        expires_at: chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::seconds(req.ttl_secs as i64))
+            .unwrap()
+            .to_rfc3339(),
+        worker: machine.worker.clone(),
+        worker_sev_snp_attested: machine.sev_snp_attested,
+        pty_endpoint: format!("/agent/{}/pty", machine.id),
+        audit_stream: format!("/agent/{}/audit", machine.id),
+    })
+}
+
+/// Resume an existing session (no phone approval needed).
+pub fn resume_session(
+    state: &AppState,
+    tenant_id: &str,
+    machine_id: &str,
+) -> Result<OrderResponse> {
+    let conn = state.db.get()?;
+
+    let machine: (String, String, String, String, String) = conn.query_row(
+        "SELECT id, image, worker, expires_at,
+                CASE WHEN worker_sev_snp = 1 THEN 'true' ELSE 'false' END
+         FROM machines
+         WHERE id = ?1 AND tenant_id = ?2 AND status = 'active'",
+        params![machine_id, tenant_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => SessionError::NotFound.into(),
+        _ => anyhow::Error::from(SessionError::from(e)),
+    })?;
+
+    // Check expiry
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&machine.3)
+        .map_err(|_| SessionError::Expired)?;
+    if chrono::Utc::now() > expires_at.with_timezone(&chrono::Utc) {
+        return Err(SessionError::Expired.into());
+    }
+
+    let connect_token = format!("stronghold_sess_{}", ulid::Ulid::new());
+
+    Ok(OrderResponse {
+        machine_id: machine.0,
+        connect_token,
+        expires_at: machine.3,
+        worker: machine.2,
+        worker_sev_snp_attested: machine.4 == "true",
+        pty_endpoint: format!("/agent/{}/pty", machine_id),
+        audit_stream: format!("/agent/{}/audit", machine_id),
+    })
+}
+
+/// Release (kill) a session early.
+pub async fn release_session(
+    state: &AppState,
+    tenant_id: &str,
+    machine_id: &str,
+) -> Result<()> {
+    // Kill the pod
+    crate::machines::scheduler::kill_pod(state, machine_id).await?;
+
+    // Update database
+    let conn = state.db.get()?;
+    conn.execute(
+        "UPDATE machines SET status = 'released', killed_at = datetime('now')
+         WHERE id = ?1 AND tenant_id = ?2",
+        params![machine_id, tenant_id],
+    )?;
+
+    // Audit log
+    crate::audit::log::entry(
+        &state.db, tenant_id, machine_id, "session_released",
+        serde_json::json!({"reason": "agent_released"}),
+        &state.audit_keys,
+    )?;
+
+    Ok(())
+}
+
+/// Revoke a session (instant kill, from phone).
+pub async fn revoke_session(
+    state: &AppState,
+    tenant_id: &str,
+    machine_id: &str,
+) -> Result<()> {
+    // Kill the pod
+    crate::machines::scheduler::kill_pod(state, machine_id).await?;
+
+    // Update database
+    let conn = state.db.get()?;
+    conn.execute(
+        "UPDATE machines SET status = 'revoked', killed_at = datetime('now')
+         WHERE id = ?1 AND tenant_id = ?2",
+        params![machine_id, tenant_id],
+    )?;
+
+    // Audit log
+    crate::audit::log::entry(
+        &state.db, tenant_id, machine_id, "session_revoked",
+        serde_json::json!({"reason": "phone_revoked"}),
+        &state.audit_keys,
+    )?;
+
+    Ok(())
+}
+
+/// Create an extend request (triggers phone approval).
+pub fn create_extend_request(
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
+    req: &ExtendRequest,
+) -> Result<String> {
+    let session_id = format!("ext_{}", ulid::Ulid::new());
+    let conn = db.get()?;
+    conn.execute(
+        "INSERT INTO pending_sessions
+         (id, tenant_id, machine_id, ttl_secs, reason, status, created_at, is_extend)
+         VALUES (?1, ?2, ?3, ?4, 'extend session', 'pending', datetime('now'), 1)",
+        params![session_id, tenant_id, req.machine_id, req.additional_secs],
+    )?;
+    Ok(session_id)
+}
+
+/// Finalize an approved extension.
+pub async fn finalize_extend(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: &str,
+    req: &ExtendRequest,
+) -> Result<OrderResponse> {
+    let conn = state.db.get()?;
+
+    // Extend the machine's TTL
+    conn.execute(
+        "UPDATE machines
+         SET expires_at = datetime(expires_at, '+' || ?1 || ' seconds')
+         WHERE id = ?2 AND tenant_id = ?3",
+        params![req.additional_secs, req.machine_id, tenant_id],
+    )?;
+
+    // Audit log
+    crate::audit::log::entry(
+        &state.db, tenant_id, &req.machine_id, "session_extended",
+        serde_json::json!({
+            "session_id": session_id,
+            "additional_secs": req.additional_secs,
+        }),
+        &state.audit_keys,
+    )?;
+
+    // Return the updated session info
+    resume_session(state, tenant_id, &req.machine_id)
+}
+
+/// SSE stream of pending approval requests for a tenant.
+pub fn pending_approval_stream(
+    _db: &Pool<SqliteConnectionManager>,
+    _tenant_id: &str,
+) -> impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>> {
+    // TODO: implement proper SSE stream pulling from pending_sessions table
+    async_stream::stream! {
+        // Placeholder: send a heartbeat every 30s
+        loop {
+            yield Ok(axum::response::sse::Event::default().data("heartbeat"));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    }
+}

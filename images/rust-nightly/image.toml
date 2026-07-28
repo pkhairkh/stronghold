@@ -1,0 +1,56 @@
+# Stronghold Rust Nightly Image
+#
+# Extends rocky-base with Rust nightly toolchain, common cross-compilation
+# targets, and Lean 4 (for formal proofs).
+
+name = "rust-nightly"
+extends = "rocky-base"
+description = "Rocky 9 + Rust nightly + common cross-targets + Lean 4"
+
+[packages]
+dnf = [
+    "qemu-user-static",
+    "libgmp-devel",
+    "openssl-devel",
+    "cmake",
+    "make",
+    "gcc",
+    "gcc-c++",
+    "pkgconf-pkg-config",
+    "python3",
+]
+
+[toolchains.rust]
+channel = "nightly"
+date = "2026-03-01"
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-wasip2",
+]
+components = ["rust-src", "rustfmt", "clippy", "miri"]
+
+[toolchains.elan]
+channel = "leanprover/lean4:stable"
+date = "2026-02-15"
+
+[env]
+CARGO_TARGET_DIR = "{home}/target"
+RUSTFLAGS = "-C target-cpu=native"
+RUST_BACKTRACE = "1"
+CARGO_INCREMENTAL = "1"
+
+[pre_install]
+commands = [
+    "curl -sSfL https://wasmtime.dev/install.sh | bash -s -- --version 47.0"
+]
+
+[post_install]
+commands = [
+    "sudo dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/rust-nightly"
+org.opencontainers.image.description = "Rust nightly + Lean 4 for systems programming and formal proofs"

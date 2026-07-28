@@ -1,0 +1,64 @@
+[package]
+name = "stronghold-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Stronghold control plane — phone-approved, post-quantum, SEV-SNP attested gateway for AI agents"
+
+[[bin]]
+name = "stronghold-gateway"
+path = "src/main.rs"
+
+[features]
+default = ["sev-snp"]
+sev-snp = ["dep:sev"]
+no-sev-snp = []
+
+[dependencies]
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+ml-dsa = { workspace = true }
+ml-kem = { workspace = true }
+reqwest = { workspace = true }
+portable-pty = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+sev = { workspace = true, optional = true }
+oci-distribution = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"

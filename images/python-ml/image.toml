@@ -1,0 +1,41 @@
+# Stronghold Python ML Image
+#
+# Extends rocky-base with Python 3.12, PyTorch, and CUDA toolkit.
+
+name = "python-ml"
+extends = "rocky-base"
+description = "Rocky 9 + Python 3.12 + PyTorch + CUDA toolkit"
+
+[packages]
+dnf = [
+    "python3.12",
+    "python3.12-pip",
+    "python3.12-devel",
+    "gcc",
+    "gcc-c++",
+    "make",
+    "cmake",
+    "cuda-toolkit",
+    "cudnn",
+    "nccl",
+]
+
+[toolchains.python]
+version = "3.12.2"
+
+[env]
+PYTHONPATH = "{home}/.local/lib/python3.12/site-packages"
+CUDA_HOME = "/usr/local/cuda"
+PATH = "/usr/local/cuda/bin:{path}"
+LD_LIBRARY_PATH = "/usr/local/cuda/lib64"
+
+[post_install]
+commands = [
+    "pip3.12 install --user torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
+    "pip3.12 install --user numpy pandas scikit-learn matplotlib jupyter",
+    "sudo dnf clean all",
+]
+
+[labels]
+org.opencontainers.image.title = "stronghold/python-ml"
+org.opencontainers.image.description = "Python 3.12 + PyTorch + CUDA for ML research"
