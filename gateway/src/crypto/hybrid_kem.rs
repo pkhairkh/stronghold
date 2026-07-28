@@ -36,10 +36,9 @@ pub struct EncapsulatedSecret {
 
 impl PushKeys {
     /// Generate a new hybrid keypair.
-    #[allow(clippy::needless_borrow)] // false positive: From<&StaticSecret> requires the &
     pub fn generate() -> Self {
-        let mut rng = rand::rngs::OsRng;
-        let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+        let rng = rand::rngs::OsRng;
+        let x25519_secret = x25519_dalek::StaticSecret::random_from_rng(rng);
         let x25519_public = x25519_dalek::PublicKey::from(&x25519_secret);
 
         // TODO: generate ML-KEM-768 keypair using ml_kem crate
@@ -91,15 +90,14 @@ impl PushKeys {
 ///
 /// Returns `(encapsulated_secret, shared_secret)` where `shared_secret`
 /// is used to derive an AES-256-GCM key via HKDF-256.
-#[allow(clippy::needless_borrow)] // false positive: From<&StaticSecret> requires the &
 pub fn encapsulate(
     phone_x25519_pub: &[u8],
     phone_mlkem_pub: &[u8],
 ) -> Result<(EncapsulatedSecret, [u8; 32])> {
-    let mut rng = rand::rngs::OsRng;
+    let rng = rand::rngs::OsRng;
 
     // X25519
-    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(&mut rng);
+    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(rng);
     let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
     let phone_pub = x25519_dalek::PublicKey::from(<[u8; 32]>::try_from(phone_x25519_pub)?);
     let x25519_shared = ephemeral_secret.diffie_hellman(&phone_pub);
