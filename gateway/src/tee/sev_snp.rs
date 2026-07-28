@@ -8,6 +8,7 @@
 //! - `seal_keys()` / `unseal_keys()` — seal keys to the current measurement
 
 use anyhow::Result;
+use base64::Engine;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
