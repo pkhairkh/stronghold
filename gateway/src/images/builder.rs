@@ -20,25 +20,21 @@ const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin";
 /// Substitute `{home}` and `{path}` placeholders in an env-var value.
 ///
 /// The placeholders are case-sensitive and brace-delimited:
-///   - `{home}` → `DEFAULT_HOME` (or the config's own `HOME` env var if set)
-///   - `{path}` → `DEFAULT_PATH` (or the config's own `PATH` env var if set)
+///   - `{home}` → `DEFAULT_HOME` (`/home/dev`, the `dev` user's home
+///     directory created by rocky-base's `post_install` script)
+///   - `{path}` → `DEFAULT_PATH` (the rocky-base `PATH`, which all
+///     derived images inherit)
 ///
-/// Allowing the config's own `HOME`/`PATH` to override the defaults makes
-/// the substitution self-consistent when an image overrides these values
-/// (e.g. an image that sets `HOME = "/home/custom"` and references
-/// `{home}` elsewhere will see the override applied).
-fn substitute_placeholders(value: &str, config: &ImageConfig) -> String {
-    let home = config
-        .env
-        .get("HOME")
-        .map(String::as_str)
-        .unwrap_or(DEFAULT_HOME);
-    let path = config
-        .env
-        .get("PATH")
-        .map(String::as_str)
-        .unwrap_or(DEFAULT_PATH);
-    value.replace("{home}", home).replace("{path}", path)
+/// Substitution always uses the rocky-base defaults, *not* the image's
+/// own `HOME`/`PATH` env overrides. This avoids recursive substitution
+/// when an image overrides `PATH` with a value that itself contains
+/// `{path}` (e.g. `PATH = "/usr/local/cuda/bin:{path}"` in python-ml)
+/// — the `{path}` placeholder refers to the *inherited* PATH, not the
+/// image's own (overridden) value.
+fn substitute_placeholders(value: &str, _config: &ImageConfig) -> String {
+    value
+        .replace("{home}", DEFAULT_HOME)
+        .replace("{path}", DEFAULT_PATH)
 }
 
 /// Generate a Containerfile from an image.toml config.
@@ -739,8 +735,11 @@ EXTRA_PATH = "/opt/bin:{path}"
     }
 
     #[test]
-    fn test_placeholder_home_respects_config_override() {
-        // When the image overrides HOME, {home} should use the override.
+    fn test_placeholder_home_ignores_config_override() {
+        // The {home} placeholder always refers to the dev user's home
+        // directory (/home/dev) as created by rocky-base — even if the
+        // image overrides HOME. This is intentional: {home} is the
+        // *actual* home directory, not the env var value.
         let toml = r#"
 name = "home-override"
 extends = "rocky-base"
@@ -752,15 +751,18 @@ CARGO_TARGET_DIR = "{home}/target"
 "#;
         let cfg = crate::images::dsl::parse(toml).expect("parse should succeed");
         let cf = generate_containerfile(&cfg).expect("generate should succeed");
-        // HOME env line is emitted verbatim
+        // HOME env line is emitted verbatim (the override)
         assert!(cf.contains("ENV HOME=\"/home/custom\""));
-        // {home} placeholder uses the overridden value
-        assert!(cf.contains("ENV CARGO_TARGET_DIR=\"/home/custom/target\""));
+        // {home} placeholder uses the default /home/dev, not the override
+        assert!(cf.contains("ENV CARGO_TARGET_DIR=\"/home/dev/target\""));
     }
 
     #[test]
-    fn test_placeholder_path_respects_config_override() {
-        // When the image overrides PATH, {path} should use the override.
+    fn test_placeholder_path_ignores_config_override() {
+        // The {path} placeholder always refers to the rocky-base PATH
+        // (the inherited PATH) — even if the image overrides PATH. This
+        // avoids recursive substitution when the override itself contains
+        // {path} (e.g. python-ml: PATH = "/usr/local/cuda/bin:{path}").
         let toml = r#"
 name = "path-override"
 extends = "rocky-base"
@@ -772,8 +774,12 @@ EXTRA_PATH = "{path}:/extra"
 "#;
         let cfg = crate::images::dsl::parse(toml).expect("parse should succeed");
         let cf = generate_containerfile(&cfg).expect("generate should succeed");
+        // PATH env line is emitted verbatim (the override)
         assert!(cf.contains("ENV PATH=\"/custom/bin\""));
-        assert!(cf.contains("ENV EXTRA_PATH=\"/custom/bin:/extra\""));
+        // {path} placeholder uses the default rocky-base PATH, not the override
+        assert!(cf.contains(
+            "ENV EXTRA_PATH=\"/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/extra\""
+        ));
     }
 
     #[test]
@@ -849,7 +855,7 @@ NUMBER = "42"
 
     #[test]
     fn test_substitute_placeholders_helper_directly() {
-        let mut cfg = ImageConfig {
+        let cfg = ImageConfig {
             name: "test".to_string(),
             extends: "rocky-base".to_string(),
             description: String::new(),
@@ -870,12 +876,11 @@ NUMBER = "42"
         );
         assert_eq!(substitute_placeholders("plain", &cfg), "plain");
         assert_eq!(substitute_placeholders("", &cfg), "");
-
-        // With overrides
-        cfg.env.insert("HOME".to_string(), "/custom/home".to_string());
-        cfg.env.insert("PATH".to_string(), "/custom/path".to_string());
-        assert_eq!(substitute_placeholders("{home}", &cfg), "/custom/home");
-        assert_eq!(substitute_placeholders("{path}", &cfg), "/custom/path");
+        // Combined
+        assert_eq!(
+            substitute_placeholders("{home}/target:{path}/extra", &cfg),
+            "/home/dev/target:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin/extra"
+        );
     }
 
     // ----------------------------------------------------------------------
