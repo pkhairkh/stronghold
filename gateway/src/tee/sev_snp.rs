@@ -234,9 +234,7 @@ pub fn seal_keys(keys: &[u8]) -> Result<Vec<u8>> {
         let dk = sev::firmware::guest::DerivedKey::new(false, gfs, 0, 0, 0);
         match fw.get_derived_key(None, dk) {
             Ok(hw_key) => {
-                let key_arr: [u8; sealing::KEY_LEN] =
-                    hw_key.into();
-                return sealing::seal_with_key(&key_arr, keys);
+                return sealing::seal_with_key(&hw_key, keys);
             }
             Err(e) => {
                 tracing::warn!(
@@ -270,8 +268,7 @@ pub fn unseal_keys(sealed: &[u8]) -> Result<Vec<u8>> {
         let dk = sev::firmware::guest::DerivedKey::new(false, gfs, 0, 0, 0);
         match fw.get_derived_key(None, dk) {
             Ok(hw_key) => {
-                let key_arr: [u8; sealing::KEY_LEN] = hw_key.into();
-                return sealing::unseal_with_key(&key_arr, sealed);
+                return sealing::unseal_with_key(&hw_key, sealed);
             }
             Err(e) => {
                 tracing::warn!(

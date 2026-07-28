@@ -169,6 +169,7 @@ pub async fn send_notification_to(
 ///
 /// Used by the W5-T7 test that proves the ntfy server cannot read
 /// push content.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_encrypted_notification_to(
     client: &Client,
     ntfy_url: &str,
