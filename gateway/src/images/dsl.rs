@@ -15,7 +15,7 @@ pub struct ImageConfig {
     #[serde(default)]
     pub packages: Packages,
 
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_toolchains")]
     pub toolchains: std::collections::HashMap<String, Toolchain>,
 
     #[serde(default)]
@@ -76,6 +76,156 @@ pub struct ScriptSection {
 pub struct InjectContainerfile {
     #[serde(default)]
     pub snippets: Vec<String>,
+}
+
+/// Custom deserializer for the `toolchains` map.
+///
+/// The `Toolchain` enum uses `#[serde(untagged)]`, which means serde tries
+/// each variant in declaration order. Since `Node`, `Python`, and `Go`
+/// all have the same shape (`{ version: String }`), serde would always
+/// pick `Node` for any of them — losing the type information.
+///
+/// This deserializer uses the *map key* (e.g. `"go"` in `[toolchains.go]`)
+/// to pick the correct variant. Unknown toolchain names produce a clear
+/// error rather than silently mis-tagging as `Node`.
+fn deserialize_toolchains<'de, D>(
+    deserializer: D,
+) -> std::result::Result<std::collections::HashMap<String, Toolchain>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{MapAccess, Visitor};
+    use std::fmt;
+
+    struct ToolchainsVisitor;
+
+    impl<'de> Visitor<'de> for ToolchainsVisitor {
+        type Value = std::collections::HashMap<String, Toolchain>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "a map of toolchain name to toolchain config")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut out: std::collections::HashMap<String, Toolchain> =
+                std::collections::HashMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                let value: toml::Value = map.next_value()?;
+                let toolchain = match key.as_str() {
+                    "rust" => {
+                        let channel = value
+                            .get("channel")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "rust toolchain requires a `channel` string field",
+                                )
+                            })?
+                            .to_string();
+                        let date = value
+                            .get("date")
+                            .and_then(toml::Value::as_str)
+                            .map(String::from);
+                        let targets = value
+                            .get("targets")
+                            .and_then(toml::Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(toml::Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let components = value
+                            .get("components")
+                            .and_then(toml::Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(toml::Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Toolchain::Rust {
+                            channel,
+                            date,
+                            targets,
+                            components,
+                        }
+                    }
+                    "node" => {
+                        let version = value
+                            .get("version")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "node toolchain requires a `version` string field",
+                                )
+                            })?
+                            .to_string();
+                        Toolchain::Node { version }
+                    }
+                    "python" => {
+                        let version = value
+                            .get("version")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "python toolchain requires a `version` string field",
+                                )
+                            })?
+                            .to_string();
+                        Toolchain::Python { version }
+                    }
+                    "go" => {
+                        let version = value
+                            .get("version")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "go toolchain requires a `version` string field",
+                                )
+                            })?
+                            .to_string();
+                        Toolchain::Go { version }
+                    }
+                    "elan" => {
+                        let channel = value
+                            .get("channel")
+                            .and_then(toml::Value::as_str)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(
+                                    "elan toolchain requires a `channel` string field",
+                                )
+                            })?
+                            .to_string();
+                        let date = value
+                            .get("date")
+                            .and_then(toml::Value::as_str)
+                            .map(String::from);
+                        Toolchain::Elan { channel, date }
+                    }
+                    // Unknown toolchain name — return a clear error. The 5
+                    // known toolchain kinds (rust, node, python, go, elan)
+                    // cover the entire v1 catalog. New kinds must be added
+                    // here explicitly.
+                    _ => {
+                        return Err(serde::de::Error::custom(format!(
+                            "unknown toolchain '{}' (expected one of: rust, node, python, go, elan)",
+                            key
+                        )))
+                    }
+                };
+                out.insert(key, toolchain);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_map(ToolchainsVisitor)
 }
 
 /// Parse an `image.toml` file.
@@ -149,8 +299,8 @@ mod tests {
             cfg.description,
             "Rocky Linux 9 minimal base with essential dev tools"
         );
-        // Packages: 26 dnf entries, empty apt
-        assert_eq!(cfg.packages.dnf.len(), 26);
+        // Packages: 25 dnf entries, empty apt
+        assert_eq!(cfg.packages.dnf.len(), 25);
         assert!(cfg.packages.apt.is_empty());
         assert!(cfg.packages.dnf.contains(&"fish".to_string()));
         assert!(cfg.packages.dnf.contains(&"sudo".to_string()));

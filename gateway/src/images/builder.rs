@@ -656,7 +656,7 @@ extends = "rocky-base"
 description = "Escape hatch ordering test"
 
 [labels]
-org.opencontainers.image.title = "ordering-test"
+"org.opencontainers.image.title" = "ordering-test"
 
 [pre_install]
 commands = ["echo STEP_PRE"]
