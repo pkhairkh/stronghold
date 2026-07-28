@@ -134,7 +134,8 @@ async fn serve(bind_addr: &str) -> Result<()> {
     let app = routes::build_router(db_pool, audit_keys, push_keys);
 
     // Configure TLS (X25519Kyber768 hybrid)
-    let tls_config = crypto::tls::build_server_config()?;
+    // TODO: wire tls_config into the axum server (Wave 4)
+    let _tls_config = crypto::tls::build_server_config()?;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!("Gateway listening on {}", bind_addr);
 
