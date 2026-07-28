@@ -272,8 +272,10 @@ pub fn encapsulate(
     }
     let mut ek_arr = [0u8; MLKEM_PUB_LEN];
     ek_arr.copy_from_slice(phone_mlkem_pub);
-    let ek_encoded = Encoded::<EncapsulationKey<MlKem768Params>>::from(&ek_arr);
-    let ek = EncapsulationKey::<MlKem768Params>::from_bytes(&ek_encoded);
+    // Use from_slice to get an &Encoded<_> reference.
+    let ek_encoded: &Encoded<EncapsulationKey<MlKem768Params>> =
+        Encoded::<EncapsulationKey<MlKem768Params>>::from_slice(&ek_arr);
+    let ek = EncapsulationKey::<MlKem768Params>::from_bytes(ek_encoded);
     let (ct, mlkem_shared) = ek
         .encapsulate(&mut rng)
         .map_err(|e| anyhow::anyhow!("ml-kem encapsulate failed: {:?}", e))?;
@@ -324,8 +326,8 @@ pub fn decapsulate(
     }
     let mut ct_arr = [0u8; MLKEM_CIPHERTEXT_LEN];
     ct_arr.copy_from_slice(&encapsulated.mlkem_ciphertext);
-    let ct_encoded = Encoded::<ml_kem::Ciphertext<MlKem768>>::from(&ct_arr);
-    let ct = ml_kem::Ciphertext::<MlKem768>::from(&ct_encoded);
+    // Ciphertext<K> is just Array<u8, K::CiphertextSize> — no from_bytes needed.
+    let ct: ml_kem::Ciphertext<MlKem768> = ml_kem::Ciphertext::<MlKem768>::from(ct_arr);
 
     if keys.mlkem_secret.len() != MLKEM_SECRET_LEN {
         return Err(anyhow::anyhow!(
@@ -336,8 +338,9 @@ pub fn decapsulate(
     }
     let mut dk_arr = [0u8; MLKEM_SECRET_LEN];
     dk_arr.copy_from_slice(&keys.mlkem_secret);
-    let dk_encoded = Encoded::<DecapsulationKey<MlKem768Params>>::from(&dk_arr);
-    let dk = DecapsulationKey::<MlKem768Params>::from_bytes(&dk_encoded);
+    let dk_encoded: &Encoded<DecapsulationKey<MlKem768Params>> =
+        Encoded::<DecapsulationKey<MlKem768Params>>::from_slice(&dk_arr);
+    let dk = DecapsulationKey::<MlKem768Params>::from_bytes(dk_encoded);
 
     let mlkem_shared = dk
         .decapsulate(&ct)
