@@ -60,7 +60,10 @@ regex = { workspace = true }
 aho-corasick = { workspace = true }
 sev = { workspace = true, optional = true }
 oci-distribution = { workspace = true }
+nix = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.13"
+proptest = { workspace = true }
+tempfile = { workspace = true }
