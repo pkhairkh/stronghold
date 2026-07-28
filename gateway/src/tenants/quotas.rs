@@ -118,3 +118,86 @@ pub fn check_capacity(
 
     Ok(true)
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_memory_pool;
+    use crate::tenants::registry;
+
+    fn create_tenant_with_quota(pool: &Pool<SqliteConnectionManager>) -> String {
+        let tenant = registry::create(pool, "test").unwrap();
+        set(pool, &tenant.id, 5, 8, 16).unwrap();
+        tenant.id
+    }
+
+    #[test]
+    fn test_set_and_get_quota() {
+        let pool = init_memory_pool().unwrap();
+        let tenant_id = create_tenant_with_quota(&pool);
+        let q = get(&pool, &tenant_id).unwrap();
+        assert_eq!(q.tenant_id, tenant_id);
+        assert_eq!(q.max_concurrent_machines, 5);
+        assert_eq!(q.max_cpu_per_machine, 8);
+        assert_eq!(q.max_memory_gb_per_machine, 16);
+    }
+
+    #[test]
+    fn test_get_nonexistent_quota_errors() {
+        let pool = init_memory_pool().unwrap();
+        let result = get(&pool, "tenant_nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_capacity_within_limits() {
+        let pool = init_memory_pool().unwrap();
+        let tenant_id = create_tenant_with_quota(&pool);
+        assert!(check_capacity(&pool, &tenant_id, 4, 8).unwrap());
+    }
+
+    #[test]
+    fn test_check_capacity_exceeds_cpu_per_machine() {
+        let pool = init_memory_pool().unwrap();
+        let tenant_id = create_tenant_with_quota(&pool);
+        // max_cpu_per_machine is 8
+        assert!(!check_capacity(&pool, &tenant_id, 16, 8).unwrap());
+    }
+
+    #[test]
+    fn test_check_capacity_exceeds_memory_per_machine() {
+        let pool = init_memory_pool().unwrap();
+        let tenant_id = create_tenant_with_quota(&pool);
+        // max_memory_gb_per_machine is 16
+        assert!(!check_capacity(&pool, &tenant_id, 4, 32).unwrap());
+    }
+
+    #[test]
+    fn test_check_capacity_no_quota_errors() {
+        let pool = init_memory_pool().unwrap();
+        // Create tenant but don't set quota.
+        let tenant = registry::create(&pool, "no-quota").unwrap();
+        let result = check_capacity(&pool, &tenant.id, 4, 8);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_quota_is_replaceable() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "test").unwrap();
+        set(&pool, &tenant.id, 3, 4, 8).unwrap();
+        let q1 = get(&pool, &tenant.id).unwrap();
+        assert_eq!(q1.max_concurrent_machines, 3);
+
+        // Replace with higher quota.
+        set(&pool, &tenant.id, 10, 16, 32).unwrap();
+        let q2 = get(&pool, &tenant.id).unwrap();
+        assert_eq!(q2.max_concurrent_machines, 10);
+        assert_eq!(q2.max_cpu_per_machine, 16);
+    }
+}
+

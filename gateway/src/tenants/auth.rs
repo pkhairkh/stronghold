@@ -159,3 +159,122 @@ fn generate_random_token() -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_memory_pool;
+    use crate::tenants::registry;
+
+    #[test]
+    fn test_mint_and_verify_agent_token() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let token = mint_agent_token(&pool, &tenant.id, "default", 3600).unwrap();
+        assert!(token.starts_with("stronghold_agent_"));
+        let verified_tenant = verify_agent_token(&pool, &token).unwrap();
+        assert_eq!(verified_tenant, tenant.id);
+    }
+
+    #[test]
+    fn test_verify_agent_token_rejects_invalid() {
+        let pool = init_memory_pool().unwrap();
+        let result = verify_agent_token(&pool, "stronghold_agent_invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_agent_token_rejects_expired() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        // Mint with TTL of 0 seconds (already expired).
+        let token = mint_agent_token(&pool, &tenant.id, "default", 0).unwrap();
+        // The token might still be valid within the same second.
+        // Let's manually expire it.
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "UPDATE agent_tokens SET expires_at = '2020-01-01T00:00:00Z' WHERE token_hash = ?1",
+            params![hash_token(&token)],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = verify_agent_token(&pool, &token);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_agent_token_rejects_revoked() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        let token = mint_agent_token(&pool, &tenant.id, "default", 3600).unwrap();
+
+        // Revoke the token.
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "UPDATE agent_tokens SET revoked_at = datetime('now') WHERE token_hash = ?1",
+            params![hash_token(&token)],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = verify_agent_token(&pool, &token);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_setup_password_correct() {
+        let pool = init_memory_pool().unwrap();
+        let tenant = registry::create(&pool, "alice").unwrap();
+        // verify_setup_password should accept the correct password.
+        let result = verify_setup_password(&pool, &tenant.setup_password);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_setup_password_rejects_wrong() {
+        let pool = init_memory_pool().unwrap();
+        let _tenant = registry::create(&pool, "alice").unwrap();
+        let result = verify_setup_password(&pool, "wrong-password");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hash_token_is_deterministic() {
+        let h1 = hash_token("test-token");
+        let h2 = hash_token("test-token");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_token_differs_per_input() {
+        let h1 = hash_token("token-1");
+        let h2 = hash_token("token-2");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_generate_random_token_is_unique() {
+        let t1 = generate_random_token();
+        let t2 = generate_random_token();
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn test_agent_tokens_scoped_per_tenant() {
+        let pool = init_memory_pool().unwrap();
+        let tenant_a = registry::create(&pool, "alice").unwrap();
+        let tenant_b = registry::create(&pool, "bob").unwrap();
+        let token_a = mint_agent_token(&pool, &tenant_a.id, "default", 3600).unwrap();
+
+        // Token for tenant A should verify as tenant A, not tenant B.
+        let verified = verify_agent_token(&pool, &token_a).unwrap();
+        assert_eq!(verified, tenant_a.id);
+        assert_ne!(verified, tenant_b.id);
+    }
+}
+
