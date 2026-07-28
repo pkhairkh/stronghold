@@ -135,9 +135,10 @@ async fn serve(bind_addr: &str) -> Result<()> {
     // Build the axum router
     let app = routes::build_router(db_pool, audit_keys, push_keys);
 
-    // Configure TLS (X25519Kyber768 hybrid)
-    // TODO: wire tls_config into the axum server (Wave 4)
-    let _tls_config = crypto::tls::build_server_config()?;
+    // Configure TLS (X25519MLKEM768 hybrid).
+    // TODO W4-T: wire tls_config into the axum server and load real cert from /etc/stronghold/keys/.
+    // For now, skip TLS config in dev mode (no cert available).
+    let _tls_config = crypto::tls::build_client_config();
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!("Gateway listening on {}", bind_addr);
 
