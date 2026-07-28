@@ -27,9 +27,10 @@ pub struct DualSignature {
 
 impl AuditKeys {
     /// Generate a new hybrid keypair.
+    #[allow(clippy::needless_borrows_for_generic_args)] // false positive: generate() takes &mut R
     pub fn generate() -> Self {
-        let rng = rand::rngs::OsRng;
-        let ed25519_secret = SigningKey::generate(rng);
+        let mut rng = rand::rngs::OsRng;
+        let ed25519_secret = SigningKey::generate(&mut rng);
         let ed25519_public = ed25519_secret.verifying_key();
 
         // TODO: generate ML-DSA-65 keypair using ml_dsa crate
