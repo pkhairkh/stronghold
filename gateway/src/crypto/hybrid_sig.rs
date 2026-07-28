@@ -350,6 +350,7 @@ fn write_public_file(path: &str, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // --- W1-T1: keypair generation + save/load ---
 
