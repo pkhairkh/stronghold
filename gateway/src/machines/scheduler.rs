@@ -4,8 +4,8 @@
 //! Uses kube-rs to communicate with the k3s API server.
 
 use anyhow::{Context, Result};
-use kube::api::{Api, DeleteParams, Pod, ResourceExt};
-use kube::config::Kubeconfig;
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, DeleteParams, ListParams, Meta};
 use kube::Client as KubeClient;
 use std::env;
 
@@ -21,17 +21,17 @@ pub struct ScheduledMachine {
 /// Get a Kubernetes client connected to the local k3s cluster.
 async fn get_kube_client() -> Result<KubeClient> {
     // Try in-cluster config first, then fall back to kubeconfig file.
-    let client = if let Ok(config) = kube::Config::incluster() {
-        KubeClient::try_from(config)?
+    if let Ok(config) = kube::Config::incluster() {
+        Ok(KubeClient::try_from(config)?)
     } else {
-        // Use the default kubeconfig location for k3s.
+        // Use the KUBECONFIG env var or the default k3s path.
         let kubeconfig_path =
             env::var("KUBECONFIG").unwrap_or_else(|_| "/etc/rancher/k3s/k3s.yaml".to_string());
-        let config = kube::Config::custom_config()
-            .with_context(|| format!("loading kubeconfig from {}", kubeconfig_path))?;
-        KubeClient::try_from(config)?
-    };
-    Ok(client)
+        let config = kube::Config::infer()
+            .await
+            .with_context(|| format!("inferring kubeconfig (looked for {})", kubeconfig_path))?;
+        Ok(KubeClient::try_from(config)?)
+    }
 }
 
 /// Schedule a pod on a worker with available capacity.
@@ -173,8 +173,8 @@ impl PtyHandle {
 pub async fn list_pods() -> Result<Vec<String>> {
     let client = get_kube_client().await?;
     let pods: Api<Pod> = Api::default_namespaced(client);
-    let pod_list = pods.list(&Default::default()).await?;
-    Ok(pod_list.iter().map(|p| p.name_any()).collect())
+    let pod_list = pods.list(&ListParams::default()).await?;
+    Ok(pod_list.iter().filter_map(|p| Meta::name(p).to_string().into()).collect())
 }
 
 #[cfg(test)]
