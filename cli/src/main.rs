@@ -11,7 +11,7 @@
 
 // Scaffold-stage allow: will be removed in Wave 11 (Integration & E2E).
 #![allow(dead_code)]
-#![allow(clippy::literal_string_with_format_arg)]
+#![allow(clippy::print_literal)]
 
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
