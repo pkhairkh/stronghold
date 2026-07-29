@@ -614,6 +614,7 @@ mod tests {
     // --- W5-T9: daily digest ---
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_push_daily_digest_sends_summary() {
         let mock = MockNtfy::start().await;
 
@@ -641,6 +642,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_push_daily_digest_zero_counts() {
         let mock = MockNtfy::start().await;
         std::env::set_var("STRONGHOLD_NTFY_URL", &mock.base_url);
