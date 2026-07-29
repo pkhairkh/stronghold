@@ -84,8 +84,8 @@ pub async fn order(
     let session_id = crate::sessions::manager::create_pending(&state.db, &tenant_id, &req)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Push to phones via ntfy
-    crate::push::ntfy::push_approval_request(&tenant_id, &session_id, &req)
+    // Push to phones via ntfy (E2E encrypted if phone keys enrolled)
+    crate::push::ntfy::push_approval_request(&tenant_id, &session_id, &req, &state.db)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
@@ -198,7 +198,7 @@ pub async fn extend(
     let session_id = crate::sessions::manager::create_extend_request(&state.db, &tenant_id, &req)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::push::ntfy::push_extend_request(&tenant_id, &session_id, &req)
+    crate::push::ntfy::push_extend_request(&tenant_id, &session_id, &req, &state.db)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
