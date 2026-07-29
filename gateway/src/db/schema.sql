@@ -228,3 +228,79 @@ CREATE INDEX IF NOT EXISTS idx_tasks_machine ON tasks(machine_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_agent_credentials_tenant ON agent_credentials(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_agent_messages_channel ON agent_messages(channel, created_at);
+
+-- Watchdog reports (agent monitoring)
+CREATE TABLE IF NOT EXISTS watchdog_reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    watcher_machine TEXT NOT NULL,
+    watched_machine TEXT NOT NULL,
+    watched_task_id TEXT,
+    dedication_score REAL NOT NULL,
+    progress_files  INTEGER,
+    progress_tests  INTEGER,
+    progress_commits INTEGER,
+    last_activity_secs INTEGER,
+    workaround_warnings TEXT,
+    ultimatum_level INTEGER DEFAULT 0,
+    assessment      TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- Ultimata (watchdog → agent)
+CREATE TABLE IF NOT EXISTS ultimata (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchdog_machine TEXT NOT NULL,
+    target_machine  TEXT NOT NULL,
+    target_task_id  TEXT,
+    level           INTEGER NOT NULL,
+    message         TEXT NOT NULL,
+    acknowledged    INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    acknowledged_at TEXT
+);
+
+-- Agent roles (system prompts + tool permissions)
+CREATE TABLE IF NOT EXISTS agent_roles (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    system_prompt   TEXT NOT NULL,
+    allowed_tools   TEXT NOT NULL DEFAULT '[]',
+    denied_tools    TEXT NOT NULL DEFAULT '[]',
+    created_at      TEXT NOT NULL,
+    UNIQUE(tenant_id, name)
+);
+
+-- Disagreements (facilitator mediation)
+CREATE TABLE IF NOT EXISTS disagreements (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    task_id         TEXT,
+    machine_id      TEXT NOT NULL,
+    issue           TEXT NOT NULL,
+    coder_argument  TEXT,
+    reviewer_argument TEXT,
+    context         TEXT,
+    decision        TEXT,
+    reasoning       TEXT,
+    precedent       TEXT,
+    status          TEXT DEFAULT 'pending',
+    created_at      TEXT NOT NULL,
+    resolved_at     TEXT
+);
+
+-- Workflow templates
+CREATE TABLE IF NOT EXISTS workflow_templates (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    dag             TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    UNIQUE(tenant_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchdog_watched ON watchdog_reports(watched_machine, created_at);
+CREATE INDEX IF NOT EXISTS idx_ultimata_target ON ultimata(target_machine, acknowledged);
+CREATE INDEX IF NOT EXISTS idx_agent_roles_tenant ON agent_roles(tenant_id, name);
+CREATE INDEX IF NOT EXISTS idx_disagreements_status ON disagreements(status);
+CREATE INDEX IF NOT EXISTS idx_workflow_templates_tenant ON workflow_templates(tenant_id, name);

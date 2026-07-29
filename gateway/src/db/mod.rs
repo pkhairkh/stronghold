@@ -188,6 +188,91 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         tracing::info!("Migration 003 applied");
     }
 
+    // Migration 004: watchdog, roles, disagreements, workflow_templates tables.
+    let applied_004: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _migrations WHERE id = 4",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if applied_004 == 0 {
+        tracing::info!("Running migration 004: watchdog/roles/disagreements/templates tables");
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS watchdog_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                watcher_machine TEXT NOT NULL,
+                watched_machine TEXT NOT NULL,
+                watched_task_id TEXT,
+                dedication_score REAL NOT NULL,
+                progress_files INTEGER,
+                progress_tests INTEGER,
+                progress_commits INTEGER,
+                last_activity_secs INTEGER,
+                workaround_warnings TEXT,
+                ultimatum_level INTEGER DEFAULT 0,
+                assessment TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ultimata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                watchdog_machine TEXT NOT NULL,
+                target_machine TEXT NOT NULL,
+                target_task_id TEXT,
+                level INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                acknowledged INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                acknowledged_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS agent_roles (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                allowed_tools TEXT NOT NULL DEFAULT '[]',
+                denied_tools TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                UNIQUE(tenant_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS disagreements (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                task_id TEXT,
+                machine_id TEXT NOT NULL,
+                issue TEXT NOT NULL,
+                coder_argument TEXT,
+                reviewer_argument TEXT,
+                context TEXT,
+                decision TEXT,
+                reasoning TEXT,
+                precedent TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS workflow_templates (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                dag TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(tenant_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_watchdog_watched ON watchdog_reports(watched_machine, created_at);
+            CREATE INDEX IF NOT EXISTS idx_ultimata_target ON ultimata(target_machine, acknowledged);
+            CREATE INDEX IF NOT EXISTS idx_agent_roles_tenant ON agent_roles(tenant_id, name);
+            CREATE INDEX IF NOT EXISTS idx_disagreements_status ON disagreements(status);
+            CREATE INDEX IF NOT EXISTS idx_workflow_templates_tenant ON workflow_templates(tenant_id, name);"
+        )?;
+        tx.execute(
+            "INSERT INTO _migrations (id, name, applied_at) VALUES (4, 'watchdog_roles_disagreements_templates', datetime('now'))",
+            [],
+        )?;
+        tx.commit()?;
+        tracing::info!("Migration 004 applied");
+    }
+
     Ok(())
 }
 
@@ -258,7 +343,7 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
     }
 
     #[test]
@@ -326,5 +411,23 @@ mod tests {
             tables.contains(&"agent_messages".to_string()),
             "agent_messages table missing"
         );
+    }
+
+    #[test]
+    fn test_watchdog_and_roles_tables_exist() {
+        let pool = init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(tables.contains(&"watchdog_reports".to_string()), "watchdog_reports missing");
+        assert!(tables.contains(&"ultimata".to_string()), "ultimata missing");
+        assert!(tables.contains(&"agent_roles".to_string()), "agent_roles missing");
+        assert!(tables.contains(&"disagreements".to_string()), "disagreements missing");
+        assert!(tables.contains(&"workflow_templates".to_string()), "workflow_templates missing");
     }
 }
