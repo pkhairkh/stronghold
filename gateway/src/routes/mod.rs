@@ -99,7 +99,7 @@ pub fn build_router(
     // Global concurrency limiter — shared across all routes.
     let concurrency_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
-    Router::new()
+    let router = Router::new()
         // Agent protocol
         .route("/agent/order", axum::routing::post(agent::order))
         .route("/agent/resume", axum::routing::post(agent::resume))
@@ -197,4 +197,13 @@ pub fn build_router(
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
     (router, state)
+}
+
+/// Build the main axum router with all routes (legacy — returns Router only).
+pub fn build_router_simple(
+    db_pool: Pool<SqliteConnectionManager>,
+    audit_keys: AuditKeys,
+    push_keys: PushKeys,
+) -> Router {
+    build_router(db_pool, audit_keys, push_keys).0
 }
