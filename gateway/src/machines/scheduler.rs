@@ -511,9 +511,16 @@ mod tests {
         let keys = crate::crypto::hybrid_sig::AuditKeys::generate();
         let tenant_key = crate::crypto::vault::derive_tenant_key("tenant_test", &keys);
 
+        // Create the tenant first (FK constraint)
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO tenants (id, name, created_at, setup_password, setup_used)
+             VALUES ('tenant_test', 'test', datetime('now'), 'dummy', 1)",
+            [],
+        ).unwrap();
+
         // Store a credential
         let (ciphertext, nonce) = crate::crypto::vault::encrypt(b"ghp_secret_token", &tenant_key).unwrap();
-        let conn = pool.get().unwrap();
         conn.execute(
             "INSERT INTO agent_credentials (id, tenant_id, name, kind, encrypted_value, nonce, env_var, created_at)
              VALUES ('cred_1', 'tenant_test', 'github-pat', 'api_token', ?1, ?2, 'GITHUB_TOKEN', datetime('now'))",
