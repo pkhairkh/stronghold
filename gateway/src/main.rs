@@ -30,6 +30,7 @@ mod routes;
 mod sessions;
 mod tee;
 mod tenants;
+mod workflow;
 
 /// Stronghold Gateway command-line interface
 #[derive(Parser)]

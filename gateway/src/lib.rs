@@ -18,3 +18,4 @@ pub mod routes;
 pub mod sessions;
 pub mod tee;
 pub mod tenants;
+pub mod workflow;

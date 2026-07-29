@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod phone;
 pub mod pty;
 pub mod tasks;
+pub mod workflows;
 
 use crate::crypto::hybrid_kem::PushKeys;
 use crate::crypto::hybrid_sig::AuditKeys;
