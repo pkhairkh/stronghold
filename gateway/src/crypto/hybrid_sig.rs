@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey, Verifier};
-use ml_dsa::{Generate, Keypair, KeyExport, MlDsa65, SigningKey as MlDsaSigningKey};
+use ml_dsa::{Generate, KeyExport, KeyInit, Keypair, MlDsa65, SigningKey as MlDsaSigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -20,8 +20,8 @@ const ED25519_SECRET_LEN: usize = 32;
 const ED25519_PUBLIC_LEN: usize = 32;
 /// Ed25519 signature is 64 bytes.
 const ED25519_SIG_LEN: usize = 64;
-/// ML-DSA-65 secret key is 4032 bytes.
-const MLDSA_SECRET_LEN: usize = 4032;
+/// ML-DSA-65 seed (secret) is 32 bytes.
+const MLDSA_SEED_LEN: usize = 32;
 /// ML-DSA-65 public key is 1952 bytes.
 const MLDSA_PUBLIC_LEN: usize = 1952;
 /// ML-DSA-65 signature is 3309 bytes.
@@ -77,11 +77,11 @@ impl AuditKeys {
         let ed25519_secret = SigningKey::generate(&mut rng);
         let ed25519_public = ed25519_secret.verifying_key();
 
-        // ML-DSA-65 keypair generation
+        // ML-DSA-65: generate signing key, export seed (32 bytes) and public key (1952 bytes)
         let mldsa_sk = MlDsaSigningKey::<MlDsa65>::generate();
         let mldsa_vk = mldsa_sk.verifying_key();
-        let mldsa_secret = mldsa_sk.to_bytes().to_vec();
-        let mldsa_public = mldsa_vk.to_bytes().to_vec();
+        let mldsa_secret = mldsa_sk.to_bytes().to_vec(); // 32-byte seed
+        let mldsa_public = mldsa_vk.to_bytes().to_vec(); // 1952-byte public key
 
         Self {
             ed25519_secret,
@@ -215,23 +215,17 @@ impl AuditKeys {
 
     /// Sign a message with ML-DSA-65 only (internal helper).
     fn sign_mldsa65(&self, message: &[u8]) -> String {
-        if self.mldsa_secret.len() != MLDSA_SECRET_LEN {
+        if self.mldsa_secret.len() != MLDSA_SEED_LEN {
             tracing::warn!(
-                "ML-DSA-65 secret key is wrong size ({}), expected {} — skipping ML-DSA signature",
+                "ML-DSA-65 seed is wrong size ({}), expected {} — skipping ML-DSA signature",
                 self.mldsa_secret.len(),
-                MLDSA_SECRET_LEN
+                MLDSA_SEED_LEN
             );
             return String::new();
         }
-        let mut sk_bytes = [0u8; MLDSA_SECRET_LEN];
-        sk_bytes.copy_from_slice(&self.mldsa_secret);
-        let sk = match MlDsaSigningKey::<MlDsa65>::from_bytes(&sk_bytes) {
-            Ok(sk) => sk,
-            Err(e) => {
-                tracing::warn!("ML-DSA-65 key deserialization failed: {:?} — skipping", e);
-                return String::new();
-            }
-        };
+        let mut seed = [0u8; MLDSA_SEED_LEN];
+        seed.copy_from_slice(&self.mldsa_secret);
+        let sk = MlDsaSigningKey::<MlDsa65>::new(&seed);
         use ml_dsa::Signer;
         let sig = sk.sign(message);
         let sig_bytes = sig.encode();
@@ -288,21 +282,20 @@ impl AuditKeys {
             return false;
         }
 
-        let mut vk_bytes = [0u8; MLDSA_PUBLIC_LEN];
-        vk_bytes.copy_from_slice(&self.mldsa_public);
-        let vk = match ml_dsa::VerifyingKey::<MlDsa65>::from_bytes(&vk_bytes) {
-            Ok(vk) => vk,
+        // Reconstruct verifying key from stored bytes.
+        let vk_arr: &[u8; MLDSA_PUBLIC_LEN] = match self.mldsa_public.as_slice().try_into() {
+            Ok(arr) => arr,
             Err(_) => return false,
         };
+        // Safety: Array<u8, N> is layout-compatible with [u8; N].
+        let vk_key_ref: &ml_dsa::array::Array<u8, _> =
+            unsafe { &*(vk_arr as *const [u8; MLDSA_PUBLIC_LEN] as *const ml_dsa::array::Array<u8, _>) };
+        let vk = ml_dsa::VerifyingKey::<MlDsa65>::new(vk_key_ref);
 
-        // Decode signature
-        let mut sig_arr = [0u8; MLDSA_SIG_LEN];
-        sig_arr.copy_from_slice(&sig_bytes);
-        let sig = match ml_dsa::Signature::<MlDsa65>::decode(&ml_dsa::param::EncodedSignature::<
-            MlDsa65,
-        >::from(&sig_arr)) {
-            Some(s) => s,
-            None => return false,
+        // Decode signature via TryFrom<&[u8]>.
+        let sig = match ml_dsa::Signature::<MlDsa65>::try_from(sig_bytes.as_slice()) {
+            Ok(s) => s,
+            Err(_) => return false,
         };
 
         use ml_dsa::Verifier;
