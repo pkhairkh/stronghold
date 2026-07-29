@@ -152,6 +152,15 @@ pub fn build_router(
         .route("/agent/:machine_id/git/branch", axum::routing::post(git::create_branch))
         .route("/agent/:machine_id/git/commit", axum::routing::post(git::commit))
         .route("/agent/:machine_id/git/push", axum::routing::post(git::push))
+        .route("/agent/:machine_id/git/pr", axum::routing::post(git::create_pr))
+        .route("/agent/:machine_id/git/status", axum::routing::get(git::status))
+        .route("/agent/:machine_id/git/log", axum::routing::get(git::log))
+        // Workflows
+        .route("/workflow", axum::routing::post(workflows::create_workflow))
+        .route("/workflow/:id", axum::routing::get(workflows::get_workflow))
+        .route("/workflow", axum::routing::get(workflows::list_workflows))
+        .route("/workflow/:id/run", axum::routing::post(workflows::run_workflow))
+        .route("/workflow/run/:id", axum::routing::get(workflows::get_run))
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))
