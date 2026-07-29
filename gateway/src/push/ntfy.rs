@@ -9,13 +9,22 @@
 //! Tested by: gateway/src/push/ntfy.rs (mock-server unit tests)
 
 use anyhow::Result;
+use base64::Engine;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Client;
 
 /// Push an approval request to the tenant's phone.
+///
+/// The push body is E2E-encrypted with the phone's enrolled X25519 +
+/// ML-KEM-768 public keys when available (see [`send_encrypted_or_fallback`]);
+/// otherwise it falls back to plaintext so the tenant still receives the
+/// request during bootstrapping.
 pub async fn push_approval_request(
     tenant_id: &str,
     session_id: &str,
     req: &crate::routes::agent::OrderRequest,
+    db: &Pool<SqliteConnectionManager>,
 ) -> Result<()> {
     let topic = format!("{}-session-requested", tenant_id);
     let title = "Stronghold: Session Request";
@@ -29,14 +38,22 @@ pub async fn push_approval_request(
         session_id, session_id
     );
 
-    send_notification(&topic, title, &message, Some(&actions), 5).await
+    let (ntfy_url, client) = ntfy_endpoint();
+    send_encrypted_or_fallback(
+        &client, &ntfy_url, &topic, title, &message, Some(&actions), 5, tenant_id, db,
+    )
+    .await
 }
 
 /// Push an extend request.
+///
+/// E2E-encrypted when the tenant has enrolled phone push keys; plaintext
+/// fallback otherwise. See [`send_encrypted_or_fallback`].
 pub async fn push_extend_request(
     tenant_id: &str,
     _session_id: &str,
     req: &crate::routes::agent::ExtendRequest,
+    db: &Pool<SqliteConnectionManager>,
 ) -> Result<()> {
     let topic = format!("{}-session-requested", tenant_id);
     let title = "Stronghold: Session Extension";
@@ -45,24 +62,45 @@ pub async fn push_extend_request(
         req.machine_id, req.additional_secs
     );
 
-    send_notification(&topic, title, &message, None, 4).await
+    let (ntfy_url, client) = ntfy_endpoint();
+    send_encrypted_or_fallback(&client, &ntfy_url, &topic, title, &message, None, 4, tenant_id, db)
+        .await
 }
 
 /// Push an anomaly alert.
-pub async fn push_anomaly(tenant_id: &str, _machine_id: &str, message: &str) -> Result<()> {
+///
+/// E2E-encrypted when the tenant has enrolled phone push keys; plaintext
+/// fallback otherwise. See [`send_encrypted_or_fallback`].
+pub async fn push_anomaly(
+    tenant_id: &str,
+    _machine_id: &str,
+    message: &str,
+    db: &Pool<SqliteConnectionManager>,
+) -> Result<()> {
     let topic = format!("{}-session-anomaly", tenant_id);
     let title = "Stronghold: Anomaly Detected";
 
-    send_notification(&topic, title, message, None, 4).await
+    let (ntfy_url, client) = ntfy_endpoint();
+    send_encrypted_or_fallback(&client, &ntfy_url, &topic, title, message, None, 4, tenant_id, db)
+        .await
 }
 
 /// Push a session-revoked confirmation.
-pub async fn push_revoked(tenant_id: &str, machine_id: &str) -> Result<()> {
+///
+/// E2E-encrypted when the tenant has enrolled phone push keys; plaintext
+/// fallback otherwise. See [`send_encrypted_or_fallback`].
+pub async fn push_revoked(
+    tenant_id: &str,
+    machine_id: &str,
+    db: &Pool<SqliteConnectionManager>,
+) -> Result<()> {
     let topic = format!("{}-session-active", tenant_id);
     let title = "Stronghold: Session Revoked";
     let message = format!("Machine {} has been revoked", machine_id);
 
-    send_notification(&topic, title, &message, None, 4).await
+    let (ntfy_url, client) = ntfy_endpoint();
+    send_encrypted_or_fallback(&client, &ntfy_url, &topic, title, &message, None, 4, tenant_id, db)
+        .await
 }
 
 /// Push a daily audit digest (W5-T9).
@@ -78,6 +116,7 @@ pub async fn push_daily_digest(
     sessions_revoked: u64,
     commands_executed: u64,
     anomalies_detected: u64,
+    db: &Pool<SqliteConnectionManager>,
 ) -> Result<()> {
     let topic = format!("{}-daily-digest", tenant_id);
     let title = "Stronghold: Daily Digest";
@@ -90,39 +129,152 @@ pub async fn push_daily_digest(
     );
 
     // Priority 3 (default) — informational, not urgent.
-    send_notification(&topic, title, &message, None, 3).await
+    let (ntfy_url, client) = ntfy_endpoint();
+    send_encrypted_or_fallback(&client, &ntfy_url, &topic, title, &message, None, 3, tenant_id, db)
+        .await
 }
 
-/// Send a notification to the local ntfy server.
-async fn send_notification(
+/// Read the ntfy server URL from the environment (defaulting to
+/// `http://localhost:8090`) and build a fresh reqwest `Client`.
+///
+/// Every production `push_*` function uses this to obtain the endpoint
+/// before delegating to [`send_encrypted_or_fallback`].
+fn ntfy_endpoint() -> (String, Client) {
+    let ntfy_url = std::env::var("STRONGHOLD_NTFY_URL")
+        .unwrap_or_else(|_| "http://localhost:8090".to_string());
+    (ntfy_url, Client::new())
+}
+
+/// Look up a tenant's phone push encryption keys from the database.
+///
+/// Returns `Ok(Some((x25519_pub, mlkem_pub)))` — the raw key bytes — if the
+/// tenant has enrolled a phone whose push keys are stored in the
+/// `phone_push_keys` table. Returns `Ok(None)` if no keys are enrolled yet
+/// (e.g. the tenant is bootstrapping and hasn't enrolled a phone).
+///
+/// The keys are stored as standard base64-encoded TEXT, matching the
+/// encoding used by [`crate::push::e2e::encode`]. If multiple phones are
+/// enrolled for a tenant, the most recently inserted row wins
+/// (`ORDER BY id DESC LIMIT 1`) — this matches the "last enrolled phone
+/// receives pushes" contract documented in ADR-0007.
+fn get_phone_push_keys(
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    use rusqlite::params;
+
+    let conn = db.get()?;
+    let result: rusqlite::Result<(String, String)> = conn.query_row(
+        "SELECT x25519_public, mlkem_public FROM phone_push_keys
+         WHERE tenant_id = ?1
+         ORDER BY id DESC
+         LIMIT 1",
+        params![tenant_id],
+        |row| {
+            let x: String = row.get(0)?;
+            let m: String = row.get(1)?;
+            Ok((x, m))
+        },
+    );
+
+    match result {
+        Ok((x_b64, m_b64)) => {
+            let x25519_pub = base64::engine::general_purpose::STANDARD
+                .decode(&x_b64)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "decoding x25519_public for tenant {}: {:?}",
+                        tenant_id,
+                        e
+                    )
+                })?;
+            let mlkem_pub =
+                base64::engine::general_purpose::STANDARD
+                    .decode(&m_b64)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "decoding mlkem_public for tenant {}: {:?}",
+                            tenant_id,
+                            e
+                        )
+                    })?;
+            Ok(Some((x25519_pub, mlkem_pub)))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Send a push notification, using E2E encryption when the tenant has
+/// enrolled phone push keys, or falling back to plaintext otherwise.
+///
+/// This is the production push path: every `push_*` function in this
+/// module routes through here. When the tenant has a row in
+/// `phone_push_keys`, the plaintext `message` is encrypted with the
+/// phone's hybrid public keys (X25519 + ML-KEM-768 → AES-256-GCM) via
+/// [`send_encrypted_notification_to`], and the ntfy server sees only
+/// base64 ciphertext.
+///
+/// If the tenant has not yet enrolled a phone (no keys), we log a warning
+/// and send the message in the clear via [`send_notification_to`] so the
+/// tenant still receives the notification on any legacy/dev subscriber —
+/// bootstrapping a phone later transparently switches them to E2E. This
+/// graceful fallback is what allows the gateway to keep operating during
+/// the alpha→beta rollout before every tenant has enrolled keys.
+#[allow(clippy::too_many_arguments)]
+async fn send_encrypted_or_fallback(
+    client: &Client,
+    ntfy_url: &str,
     topic: &str,
     title: &str,
     message: &str,
     actions: Option<&str>,
     priority: u8,
+    tenant_id: &str,
+    db: &Pool<SqliteConnectionManager>,
 ) -> Result<()> {
-    let ntfy_url = std::env::var("STRONGHOLD_NTFY_URL")
-        .unwrap_or_else(|_| "http://localhost:8090".to_string());
-
-    let client = Client::new();
-    send_notification_to(
-        &client,
-        &ntfy_url,
-        topic,
-        title,
-        message,
-        actions,
-        priority,
-    )
-    .await
+    match get_phone_push_keys(db, tenant_id)? {
+        Some((x25519_pub, mlkem_pub)) => {
+            tracing::debug!(
+                tenant_id = tenant_id,
+                topic = topic,
+                x25519_pub_len = x25519_pub.len(),
+                mlkem_pub_len = mlkem_pub.len(),
+                "Sending E2E-encrypted push notification",
+            );
+            send_encrypted_notification_to(
+                client,
+                ntfy_url,
+                topic,
+                title,
+                message.as_bytes(),
+                &x25519_pub,
+                &mlkem_pub,
+                actions,
+                priority,
+            )
+            .await
+        }
+        None => {
+            tracing::warn!(
+                tenant_id = tenant_id,
+                topic = topic,
+                "No phone push keys enrolled — sending PLAINTEXT notification. \
+                 Enroll a phone to enable E2E encryption.",
+            );
+            send_notification_to(client, ntfy_url, topic, title, message, actions, priority).await
+        }
+    }
 }
 
 /// Send a notification to an explicit ntfy server URL using an explicit
 /// reqwest `Client`.
 ///
-/// This is the test-friendly variant of [`send_notification`]: tests pass
-/// the URL of a mock HTTP server and a client they control, so they can
-/// capture the request without touching the network or the environment.
+/// This is the test-friendly building block: tests pass the URL of a mock
+/// HTTP server and a client they control, so they can capture the request
+/// without touching the network or the environment. Production code
+/// reaches this function via [`send_encrypted_or_fallback`] (which adds
+/// the E2E encryption layer).
 ///
 /// The `body` is sent verbatim as the request body. The ntfy protocol
 /// uses HTTP headers for metadata (`Title`, `Priority`, `Actions`) and
@@ -465,13 +617,12 @@ mod tests {
     async fn test_push_daily_digest_sends_summary() {
         let mock = MockNtfy::start().await;
 
-        // We test via send_notification_to with the same payload the
-        // digest function builds, because push_daily_digest reads the
-        // ntfy URL from the env var. We do call push_daily_digest below
-        // to cover its payload construction.
+        // No phone_push_keys row exists for `tenant_d`, so the digest
+        // takes the plaintext fallback path — the body is the raw summary.
         std::env::set_var("STRONGHOLD_NTFY_URL", &mock.base_url);
+        let db = crate::db::init_memory_pool().unwrap();
 
-        push_daily_digest("tenant_d", 12, 1, 348, 2).await.unwrap();
+        push_daily_digest("tenant_d", 12, 1, 348, 2, &db).await.unwrap();
 
         std::env::remove_var("STRONGHOLD_NTFY_URL");
 
@@ -493,7 +644,8 @@ mod tests {
     async fn test_push_daily_digest_zero_counts() {
         let mock = MockNtfy::start().await;
         std::env::set_var("STRONGHOLD_NTFY_URL", &mock.base_url);
-        push_daily_digest("tenant_z", 0, 0, 0, 0).await.unwrap();
+        let db = crate::db::init_memory_pool().unwrap();
+        push_daily_digest("tenant_z", 0, 0, 0, 0, &db).await.unwrap();
         std::env::remove_var("STRONGHOLD_NTFY_URL");
 
         let r = &mock.requests()[0];
