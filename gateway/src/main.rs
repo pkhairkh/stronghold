@@ -151,7 +151,7 @@ async fn serve(bind_addr: &str, dev: bool) -> Result<()> {
 
     // Build TLS server config with X25519MLKEM768 hybrid
     let tls_config = crypto::tls::build_server_config_from_files(keys_dir)?;
-    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config.into());
     tracing::info!("TLS configured with X25519MLKEM768 hybrid PQ key exchange");
 
     // Build the axum router
