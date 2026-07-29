@@ -16,10 +16,13 @@
 //!
 //! | Method | Path                                  | Handler          | Audit event  |
 //! |--------|---------------------------------------|------------------|--------------|
-//! | POST   | `/agent/:machine_id/git/clone`        | [`clone_repo`]   | `git_clone`  |
-//! | POST   | `/agent/:machine_id/git/branch`       | [`create_branch`]| `git_branch` |
-//! | POST   | `/agent/:machine_id/git/commit`       | [`commit`]       | `git_commit` |
-//! | POST   | `/agent/:machine_id/git/push`         | [`push`]         | `git_push`   |
+//! | POST   | `/agent/:machine_id/git/clone`        | [`clone_repo`]   | `git_clone`     |
+//! | POST   | `/agent/:machine_id/git/branch`       | [`create_branch`]| `git_branch`    |
+//! | POST   | `/agent/:machine_id/git/commit`       | [`commit`]       | `git_commit`    |
+//! | POST   | `/agent/:machine_id/git/push`         | [`push`]         | `git_push`      |
+//! | POST   | `/agent/:machine_id/git/pr`           | [`create_pr`]    | `git_pr_created`|
+//! | GET    | `/agent/:machine_id/git/status`       | [`status`]       | `git_status`    |
+//! | GET    | `/agent/:machine_id/git/log`          | [`log`]          | `git_log`       |
 //!
 //! # Credential handling
 //!
@@ -446,6 +449,334 @@ pub async fn push(
 }
 
 // ============================================================================
+// Pull Request (create)
+// ============================================================================
+
+/// Request body for `POST /agent/:machine_id/git/pr`.
+///
+/// Creates a GitHub pull request via the GitHub REST API. The handler fetches
+/// the tenant's `github-pat` credential (same lookup as [`clone_repo`]), runs
+/// `git remote get-url origin` in the pod to discover the `{owner}/{repo}`,
+/// and then `POST`s to `https://api.github.com/repos/{owner}/{repo}/pulls`.
+#[derive(Debug, Deserialize)]
+pub struct PrRequest {
+    /// PR title.
+    pub title: String,
+    /// PR body / description. Sent as-is to GitHub; `None` is omitted from the
+    /// request body (GitHub treats an absent `body` as empty).
+    pub body: Option<String>,
+    /// Target branch the PR merges into (e.g. `"main"`).
+    pub base: String,
+    /// Source branch the PR is opened from (e.g. `"feature-x"`).
+    pub head: String,
+}
+
+/// Response body for `POST /agent/:machine_id/git/pr`.
+#[derive(Debug, Serialize)]
+pub struct PrResponse {
+    /// GitHub-assigned PR number (e.g. `42`).
+    pub pr_number: i64,
+    /// HTML URL of the newly-created PR.
+    pub pr_url: String,
+    /// PR state as reported by GitHub (`"open"`, `"closed"`, or `"merged"`).
+    pub pr_state: String,
+}
+
+/// Handle `POST /agent/:machine_id/git/pr`.
+///
+/// Creates a GitHub pull request for the repository checked out in the agent's
+/// pod. The flow:
+///
+/// 1. Verify the `connect_token`.
+/// 2. Decrypt the tenant's `github-pat` credential. Unlike [`clone_repo`]
+///    (which is best-effort), PR creation *requires* a PAT — without one we
+///    cannot authenticate to the GitHub API.
+/// 3. Run `git remote get-url origin` in the pod to discover the repo URL.
+/// 4. Parse `owner`/`repo` from the URL (SSH or HTTPS form, with optional
+///    embedded credentials and trailing `.git`).
+/// 5. `POST` to `https://api.github.com/repos/{owner}/{repo}/pulls` with
+///    `Authorization: token <pat>` and `Accept: application/vnd.github+json`.
+/// 6. Write a `git_pr_created` audit entry (payload carries title/base/head/
+///    pr_url/pr_number — never the PAT).
+/// 7. Return the PR number, URL, and state.
+pub async fn create_pr(
+    Path(machine_id): Path<String>,
+    Query(query): Query<PtyQuery>,
+    State(state): State<AppState>,
+    Json(req): Json<PrRequest>,
+) -> Result<Json<PrResponse>, (StatusCode, String)> {
+    let tenant_id = verify_connect_token(&state, &machine_id, &query).await?;
+
+    // --- Decrypt the github-pat. PR creation requires a PAT. ---
+    let pat = decrypt_git_token(&state, &tenant_id).await?.ok_or((
+        StatusCode::BAD_REQUEST,
+        "no github-pat credential stored — cannot create PR without a PAT".to_string(),
+    ))?;
+
+    // --- Discover the repo URL via `git remote get-url origin`. ---
+    let remote_script = "git remote get-url origin";
+    let (rc, remote_out, remote_err) = exec_in_pod(&machine_id, remote_script).await?;
+    if rc != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("git remote get-url origin failed (exit {rc}): {remote_err}{remote_out}"),
+        ));
+    }
+    let remote_url = remote_out.trim();
+    let (owner, repo) = parse_owner_repo(remote_url).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("could not parse owner/repo from remote URL: {remote_url:?}"),
+        )
+    })?;
+
+    // --- Build the GitHub API request body. ---
+    let mut body = serde_json::json!({
+        "title": req.title,
+        "base": req.base,
+        "head": req.head,
+    });
+    if let Some(b) = &req.body {
+        body["body"] = serde_json::Value::String(b.clone());
+    }
+
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("token {pat}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "stronghold-gateway")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "git pr: GitHub API request failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("GitHub API request failed: {e}"),
+            )
+        })?;
+
+    let http_status = resp.status();
+    let resp_body: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::error!(
+            error = %e,
+            status = %http_status,
+            "git pr: failed to decode GitHub response"
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("failed to decode GitHub response: {e}"),
+        )
+    })?;
+
+    if !http_status.is_success() {
+        // GitHub error — surface the message but never the PAT.
+        let msg = resp_body
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown GitHub error");
+        tracing::warn!(status = %http_status, msg = msg, "git pr: GitHub API returned non-2xx");
+        let mapped = StatusCode::from_u16(http_status.as_u16())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        return Err((mapped, format!("GitHub API error ({http_status}): {msg}")));
+    }
+
+    let pr_number = resp_body
+        .get("number")
+        .and_then(|n| n.as_i64())
+        .ok_or((
+            StatusCode::BAD_GATEWAY,
+            "GitHub response missing 'number' field".to_string(),
+        ))?;
+    let pr_url = resp_body
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .ok_or((
+            StatusCode::BAD_GATEWAY,
+            "GitHub response missing 'html_url' field".to_string(),
+        ))?
+        .to_string();
+    let pr_state = resp_body
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("open")
+        .to_string();
+
+    // --- Audit (never the PAT). ---
+    let audit_payload = serde_json::json!({
+        "title": req.title,
+        "base": req.base,
+        "head": req.head,
+        "pr_url": pr_url,
+        "pr_number": pr_number,
+    });
+    let audit_seq =
+        write_audit_and_get_seq(&state, &tenant_id, &machine_id, "git_pr_created", audit_payload)
+            .await;
+
+    tracing::info!(
+        machine = %machine_id,
+        owner = %owner,
+        repo = %repo,
+        pr_number,
+        pr_url = %pr_url,
+        audit_seq,
+        "git pr created"
+    );
+
+    Ok(Json(PrResponse {
+        pr_number,
+        pr_url,
+        pr_state,
+    }))
+}
+
+// ============================================================================
+// Status
+// ============================================================================
+
+/// A single file change reported by `git status --porcelain=v2`.
+#[derive(Debug, Serialize)]
+pub struct FileChange {
+    /// Repository-relative path of the changed file.
+    pub path: String,
+    /// One-char status code from the porcelain v2 `XY` field:
+    /// `"M"` (modified), `"A"` (added), `"D"` (deleted), `"R"` (renamed),
+    /// `"C"` (copied), `"U"` (unmerged). For [`StatusResponse::staged`]
+    /// entries this is the `X` (index) status; for [`StatusResponse::unstaged`]
+    /// entries this is the `Y` (worktree) status.
+    pub status: String,
+}
+
+/// Response body for `GET /agent/:machine_id/git/status`.
+///
+/// Structured form of `git status --porcelain=v2 --branch`.
+#[derive(Debug, Serialize)]
+pub struct StatusResponse {
+    /// Current branch name (`# branch.head`). `None` if detached HEAD
+    /// (porcelain reports `(detached)`).
+    pub branch: Option<String>,
+    /// Upstream tracking branch (`# branch.upstream`), if any.
+    pub upstream: Option<String>,
+    /// Commits ahead of upstream (`# branch.ab +N -M` → N).
+    pub ahead: i64,
+    /// Commits behind upstream (`# branch.ab +N -M` → M).
+    pub behind: i64,
+    /// Files with staged changes (index vs. HEAD).
+    pub staged: Vec<FileChange>,
+    /// Files with unstaged changes (worktree vs. index).
+    pub unstaged: Vec<FileChange>,
+    /// Untracked files (porcelain `?` entries).
+    pub untracked: Vec<String>,
+}
+
+/// Handle `GET /agent/:machine_id/git/status`.
+///
+/// Runs `git status --porcelain=v2 --branch` in the pod and parses the
+/// structured output into JSON. The porcelain v2 format is the
+/// machine-readable form of `git status` and is stable across git versions.
+pub async fn status(
+    Path(machine_id): Path<String>,
+    Query(query): Query<PtyQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, (StatusCode, String)> {
+    let tenant_id = verify_connect_token(&state, &machine_id, &query).await?;
+
+    let script = "git status --porcelain=v2 --branch";
+    let started = Instant::now();
+    let (exit_code, stdout, stderr) = exec_in_pod(&machine_id, script).await?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if exit_code != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("git status failed (exit {exit_code}): {stderr}{stdout}"),
+        ));
+    }
+
+    let resp = parse_status_v2(&stdout);
+
+    // Best-effort audit — status is read-only, so we log lightly.
+    let audit_payload = serde_json::json!({
+        "branch": resp.branch,
+        "ahead": resp.ahead,
+        "behind": resp.behind,
+        "staged_count": resp.staged.len(),
+        "unstaged_count": resp.unstaged.len(),
+        "untracked_count": resp.untracked.len(),
+        "duration_ms": duration_ms,
+    });
+    let _ = write_audit_and_get_seq(
+        &state,
+        &tenant_id,
+        &machine_id,
+        "git_status",
+        audit_payload,
+    )
+    .await;
+
+    Ok(Json(resp))
+}
+
+// ============================================================================
+// Log
+// ============================================================================
+
+/// A single commit entry from `git log --oneline`.
+#[derive(Debug, Serialize)]
+pub struct LogEntry {
+    /// Abbreviated (or full) commit SHA.
+    pub sha: String,
+    /// First-line commit message (everything after the SHA on the `--oneline`
+    /// line).
+    pub message: String,
+}
+
+/// Response body for `GET /agent/:machine_id/git/log`.
+#[derive(Debug, Serialize)]
+pub struct LogResponse {
+    /// Recent commits, newest first (max 10 by default).
+    pub commits: Vec<LogEntry>,
+}
+
+/// Handle `GET /agent/:machine_id/git/log`.
+///
+/// Runs `git log --oneline -10` in the pod and parses each line into a
+/// `{ sha, message }` pair. The `--oneline` format is `<short-sha> <subject>`.
+pub async fn log(
+    Path(machine_id): Path<String>,
+    Query(query): Query<PtyQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<LogResponse>, (StatusCode, String)> {
+    let tenant_id = verify_connect_token(&state, &machine_id, &query).await?;
+
+    let script = "git log --oneline -10";
+    let started = Instant::now();
+    let (exit_code, stdout, stderr) = exec_in_pod(&machine_id, script).await?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    if exit_code != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("git log failed (exit {exit_code}): {stderr}{stdout}"),
+        ));
+    }
+
+    let commits = parse_log_oneline(&stdout);
+
+    let audit_payload = serde_json::json!({
+        "commits_count": commits.len(),
+        "duration_ms": duration_ms,
+    });
+    let _ =
+        write_audit_and_get_seq(&state, &tenant_id, &machine_id, "git_log", audit_payload).await;
+
+    Ok(Json(LogResponse { commits }))
+}
+
+// ============================================================================
 // Shared helpers
 // ============================================================================
 
@@ -831,6 +1162,204 @@ fn parse_commit_sha(stdout: &str) -> Option<String> {
                 && tok.chars().all(|c| c.is_ascii_hexdigit())
         })
         .map(|s| s.to_string())
+}
+
+/// Parse `owner`/`repo` from a git remote URL.
+///
+/// Supports the two common GitHub remote forms:
+///
+/// - SSH:   `git@github.com:owner/repo.git`
+/// - HTTPS: `https://github.com/owner/repo.git` (also with a trailing `.git`
+///   and/or embedded credentials `https://user:token@host/owner/repo.git`)
+///
+/// Returns `Some((owner, repo))` with the trailing `.git` stripped, or `None`
+/// if the URL does not contain a parseable `<owner>/<repo>` path. The host is
+/// not validated — non-GitHub URLs (e.g. GitLab) will parse too, and the
+/// caller's GitHub API call will simply fail downstream. This intentionally
+/// keeps GitHub Enterprise (custom host) remotes working.
+fn parse_owner_repo(remote_url: &str) -> Option<(String, String)> {
+    let url = remote_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let url = url.strip_prefix("git+").unwrap_or(url);
+
+    // SSH form: git@github.com:owner/repo.git
+    if let Some(rest) = url.strip_prefix("git@") {
+        // rest = "github.com:owner/repo.git"
+        let after_host = rest.split_once(':')?.1;
+        return split_owner_repo(after_host);
+    }
+
+    // HTTPS form: https://[user:pass@]host/owner/repo.git
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    // Drop credentials + host, keep the path: "owner/repo.git"
+    let path = after_scheme.split_once('/').map(|(_, p)| p)?;
+    split_owner_repo(path)
+}
+
+/// Split a `"owner/repo[.git]"` path into `(owner, repo)`, stripping a
+/// trailing `.git`. Returns `None` if either side is empty or missing.
+fn split_owner_repo(path: &str) -> Option<(String, String)> {
+    let path = path.trim_end_matches(".git");
+    let mut parts = path.splitn(2, '/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// Parse `git status --porcelain=v2 --branch` output into structured form.
+///
+/// The porcelain v2 format emits one entry per line:
+///
+/// - `# branch.oid <commit>`        — current HEAD OID (ignored)
+/// - `# branch.head <branch>`       — current branch (`(detached)` if detached)
+/// - `# branch.upstream <up>`       — upstream tracking branch (if set)
+/// - `# branch.ab +<ahead> -<beh>`  — ahead/behind counts (if upstream set)
+/// - `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`  — ordinary changed entry
+/// - `2 <XY> ... <score> <path>\t<origPath>`         — renamed/copied entry
+/// - `u <XY> ... <path>`                             — unmerged entry
+/// - `? <path>`                                       — untracked
+/// - `! <path>`                                       — ignored (skipped)
+///
+/// For staged vs. unstaged attribution we use the 2-char `XY` field: `X`
+/// (first char) is the index (staged) status, `Y` (second char) is the
+/// worktree (unstaged) status. A space means "no change on that side".
+///
+/// # Limitations
+///
+/// Paths containing spaces are C-quoted by porcelain v2 and are not
+/// unquoted here — the last space-separated token is taken as the path.
+/// This covers the overwhelmingly common case (space-free paths in code
+/// repos). Use `git status -z` for full fidelity if needed.
+fn parse_status_v2(output: &str) -> StatusResponse {
+    let mut branch: Option<String> = None;
+    let mut upstream: Option<String> = None;
+    let mut ahead: i64 = 0;
+    let mut behind: i64 = 0;
+    let mut staged: Vec<FileChange> = Vec::new();
+    let mut unstaged: Vec<FileChange> = Vec::new();
+    let mut untracked: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        if line.is_empty() {
+            continue;
+        }
+
+        // Branch header lines.
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            let v = rest.trim();
+            branch = if v == "(detached)" {
+                None
+            } else {
+                Some(v.to_string())
+            };
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+            upstream = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("# branch.ab ") {
+            // rest looks like "+5 -2"
+            for tok in rest.split_whitespace() {
+                if let Some(n) = tok.strip_prefix('+') {
+                    ahead = n.parse().unwrap_or(0);
+                } else if let Some(n) = tok.strip_prefix('-') {
+                    behind = n.parse().unwrap_or(0);
+                }
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            // `# branch.oid <sha>` or any future header — ignore.
+            continue;
+        }
+
+        // Untracked: `? <path>`
+        if let Some(rest) = line.strip_prefix("? ") {
+            untracked.push(rest.to_string());
+            continue;
+        }
+        // Ignored: `! <path>` — skip.
+        if line.starts_with("! ") {
+            continue;
+        }
+
+        // Change entries: `1 <XY> ...`, `2 <XY> ...`, `u <XY> ...`.
+        let kind = line.as_bytes().first().copied();
+        if kind == Some(b'1') || kind == Some(b'2') || kind == Some(b'u') {
+            // Format: `<kind><sp><X><Y><sp><rest>`.
+            // Need at least `<k><sp><X><Y>` = 4 bytes.
+            if line.len() < 4 {
+                continue;
+            }
+            let xy = &line[2..4];
+            let x = xy.as_bytes().first().copied().unwrap_or(b' ');
+            let y = xy.as_bytes().get(1).copied().unwrap_or(b' ');
+            // The path is the last space-separated token of the line. For
+            // `2` (rename) entries the token is `path\torigPath` — take the
+            // part before the tab (the destination / current path).
+            let path_token = line.rsplit(' ').next().unwrap_or("");
+            let path = path_token
+                .split_once('\t')
+                .map(|(p, _)| p)
+                .unwrap_or(path_token);
+            if path.is_empty() {
+                continue;
+            }
+            if x != b' ' {
+                staged.push(FileChange {
+                    path: path.to_string(),
+                    status: (x as char).to_string(),
+                });
+            }
+            if y != b' ' {
+                unstaged.push(FileChange {
+                    path: path.to_string(),
+                    status: (y as char).to_string(),
+                });
+            }
+        }
+    }
+
+    StatusResponse {
+        branch,
+        upstream,
+        ahead,
+        behind,
+        staged,
+        unstaged,
+        untracked,
+    }
+}
+
+/// Parse `git log --oneline` output into `(sha, message)` pairs.
+///
+/// Each line is `<short-sha> <subject>`. We split on the first space;
+/// everything after the first space is the message (subject). Blank lines are
+/// skipped, as are lines with no space (just a SHA) — those can't be split
+/// into a meaningful message.
+fn parse_log_oneline(output: &str) -> Vec<LogEntry> {
+    let mut commits = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((sha, msg)) = line.split_once(' ') {
+            commits.push(LogEntry {
+                sha: sha.to_string(),
+                message: msg.to_string(),
+            });
+        }
+    }
+    commits
 }
 
 // ============================================================================
@@ -1244,6 +1773,478 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_exit_code(&status), -1);
+    }
+
+    // ─── PrRequest / PrResponse ───────────────────────────────────────
+
+    #[test]
+    fn test_pr_request_deserialize_full() {
+        let json = r#"{"title":"Add feature","body":"Fixes #42","base":"main","head":"feature-x"}"#;
+        let req: PrRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.title, "Add feature");
+        assert_eq!(req.body.as_deref(), Some("Fixes #42"));
+        assert_eq!(req.base, "main");
+        assert_eq!(req.head, "feature-x");
+    }
+
+    #[test]
+    fn test_pr_request_deserialize_no_body() {
+        let json = r#"{"title":"Quick fix","base":"main","head":"patch-1"}"#;
+        let req: PrRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.title, "Quick fix");
+        assert!(req.body.is_none());
+        assert_eq!(req.base, "main");
+        assert_eq!(req.head, "patch-1");
+    }
+
+    #[test]
+    fn test_pr_request_deserialize_empty_body() {
+        let json = r#"{"title":"T","body":"","base":"main","head":"x"}"#;
+        let req: PrRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.body.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_pr_request_missing_title_fails() {
+        let json = r#"{"base":"main","head":"x"}"#;
+        assert!(serde_json::from_str::<PrRequest>(json).is_err());
+    }
+
+    #[test]
+    fn test_pr_request_missing_base_fails() {
+        let json = r#"{"title":"T","head":"x"}"#;
+        assert!(serde_json::from_str::<PrRequest>(json).is_err());
+    }
+
+    #[test]
+    fn test_pr_request_missing_head_fails() {
+        let json = r#"{"title":"T","base":"main"}"#;
+        assert!(serde_json::from_str::<PrRequest>(json).is_err());
+    }
+
+    #[test]
+    fn test_pr_response_serialize_open() {
+        let resp = PrResponse {
+            pr_number: 42,
+            pr_url: "https://github.com/acme/widget/pull/42".to_string(),
+            pr_state: "open".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(obj_len(&v), 3);
+        assert_eq!(v["pr_number"], 42);
+        assert_eq!(v["pr_url"], "https://github.com/acme/widget/pull/42");
+        assert_eq!(v["pr_state"], "open");
+    }
+
+    #[test]
+    fn test_pr_response_serialize_closed() {
+        let resp = PrResponse {
+            pr_number: 7,
+            pr_url: "https://github.com/acme/widget/pull/7".to_string(),
+            pr_state: "closed".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"pr_state\":\"closed\""));
+        assert!(json.contains("\"pr_number\":7"));
+    }
+
+    // ─── FileChange / StatusResponse (serialization) ──────────────────
+
+    #[test]
+    fn test_file_change_serialize() {
+        let fc = FileChange {
+            path: "src/main.rs".to_string(),
+            status: "M".to_string(),
+        };
+        let json = serde_json::to_string(&fc).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(obj_len(&v), 2);
+        assert_eq!(v["path"], "src/main.rs");
+        assert_eq!(v["status"], "M");
+    }
+
+    #[test]
+    fn test_status_response_serialize_clean() {
+        let resp = StatusResponse {
+            branch: Some("main".to_string()),
+            upstream: Some("origin/main".to_string()),
+            ahead: 0,
+            behind: 0,
+            staged: vec![],
+            unstaged: vec![],
+            untracked: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(obj_len(&v), 7);
+        assert_eq!(v["branch"], "main");
+        assert_eq!(v["upstream"], "origin/main");
+        assert_eq!(v["ahead"], 0);
+        assert_eq!(v["behind"], 0);
+        assert_eq!(v["staged"], serde_json::Value::Array(vec![]));
+        assert_eq!(v["unstaged"], serde_json::Value::Array(vec![]));
+        assert_eq!(v["untracked"], serde_json::Value::Array(vec![]));
+    }
+
+    #[test]
+    fn test_status_response_serialize_dirty() {
+        let resp = StatusResponse {
+            branch: Some("feat".to_string()),
+            upstream: None,
+            ahead: 3,
+            behind: 0,
+            staged: vec![FileChange {
+                path: "a.rs".to_string(),
+                status: "A".to_string(),
+            }],
+            unstaged: vec![FileChange {
+                path: "b.rs".to_string(),
+                status: "M".to_string(),
+            }],
+            untracked: vec!["c.txt".to_string()],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["upstream"], serde_json::Value::Null);
+        assert_eq!(v["ahead"], 3);
+        assert_eq!(v["staged"][0]["path"], "a.rs");
+        assert_eq!(v["staged"][0]["status"], "A");
+        assert_eq!(v["unstaged"][0]["path"], "b.rs");
+        assert_eq!(v["unstaged"][0]["status"], "M");
+        assert_eq!(v["untracked"][0], "c.txt");
+    }
+
+    // ─── parse_status_v2 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_status_v2_clean_tree() {
+        let out = "# branch.oid 1234567890abcdef1234567890abcdef12345678\n\
+                   # branch.head main\n\
+                   # branch.upstream origin/main\n\
+                   # branch.ab +0 -0\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.branch.as_deref(), Some("main"));
+        assert_eq!(s.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+        assert!(s.staged.is_empty());
+        assert!(s.unstaged.is_empty());
+        assert!(s.untracked.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_v2_ahead_behind() {
+        let out = "# branch.oid abc\n# branch.head feat\n# branch.upstream origin/feat\n# branch.ab +5 -2\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.branch.as_deref(), Some("feat"));
+        assert_eq!(s.upstream.as_deref(), Some("origin/feat"));
+        assert_eq!(s.ahead, 5);
+        assert_eq!(s.behind, 2);
+    }
+
+    #[test]
+    fn test_parse_status_v2_detached_head() {
+        let out = "# branch.oid abcdef\n# branch.head (detached)\n";
+        let s = parse_status_v2(out);
+        assert!(s.branch.is_none());
+        assert!(s.upstream.is_none());
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+    }
+
+    #[test]
+    fn test_parse_status_v2_no_upstream() {
+        let out = "# branch.oid abc\n# branch.head main\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.branch.as_deref(), Some("main"));
+        assert!(s.upstream.is_none());
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+    }
+
+    #[test]
+    fn test_parse_status_v2_staged_and_unstaged() {
+        // XY field: `M ` = staged modify; ` M` = unstaged modify; `MM` = both.
+        let out = "# branch.oid abc\n# branch.head main\n\
+                   1 M  N... 100644 100644 100644 1111 2222 staged_only.rs\n\
+                   1  M N... 100644 100644 100644 1111 2222 unstaged_only.rs\n\
+                   1 MM N... 100644 100644 100644 1111 2222 both.rs\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.staged.len(), 2);
+        assert_eq!(s.staged[0].path, "staged_only.rs");
+        assert_eq!(s.staged[0].status, "M");
+        assert_eq!(s.staged[1].path, "both.rs");
+        assert_eq!(s.staged[1].status, "M");
+        assert_eq!(s.unstaged.len(), 2);
+        assert_eq!(s.unstaged[0].path, "unstaged_only.rs");
+        assert_eq!(s.unstaged[0].status, "M");
+        assert_eq!(s.unstaged[1].path, "both.rs");
+        assert_eq!(s.unstaged[1].status, "M");
+        assert!(s.untracked.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_v2_untracked() {
+        let out = "# branch.oid abc\n# branch.head main\n\
+                   ? new_file.txt\n\
+                   ? another.txt\n";
+        let s = parse_status_v2(out);
+        assert_eq!(
+            s.untracked,
+            vec!["new_file.txt".to_string(), "another.txt".to_string()]
+        );
+        assert!(s.staged.is_empty());
+        assert!(s.unstaged.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_v2_rename() {
+        // `2` entry: R100 means 100% rename similarity; path is
+        // `new_name.rs\told_name.rs` — we take the part before the tab.
+        let out = "# branch.oid abc\n# branch.head main\n\
+                   2 R  N... 100644 100644 100644 1111 2222 R100 new_name.rs\told_name.rs\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.staged.len(), 1);
+        assert_eq!(s.staged[0].path, "new_name.rs");
+        assert_eq!(s.staged[0].status, "R");
+        assert!(s.unstaged.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_v2_added_and_deleted() {
+        let out = "# branch.oid abc\n# branch.head main\n\
+                   1 A  N... 000000 100644 100644 0000 1111 added.rs\n\
+                   1 D  N... 100644 000000 000000 1111 0000 deleted.rs\n";
+        let s = parse_status_v2(out);
+        assert_eq!(s.staged.len(), 2);
+        assert_eq!(s.staged[0].path, "added.rs");
+        assert_eq!(s.staged[0].status, "A");
+        assert_eq!(s.staged[1].path, "deleted.rs");
+        assert_eq!(s.staged[1].status, "D");
+    }
+
+    #[test]
+    fn test_parse_status_v2_empty_output() {
+        let s = parse_status_v2("");
+        assert!(s.branch.is_none());
+        assert!(s.upstream.is_none());
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+        assert!(s.staged.is_empty());
+        assert!(s.unstaged.is_empty());
+        assert!(s.untracked.is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_v2_ignored_skipped() {
+        let out = "# branch.oid abc\n# branch.head main\n\
+                   ! build_output.txt\n\
+                   ? tracked.txt\n";
+        let s = parse_status_v2(out);
+        // `!` (ignored) entries are skipped; `?` (untracked) are kept.
+        assert_eq!(s.untracked, vec!["tracked.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_status_v2_only_branch_oid_line() {
+        let out = "# branch.oid deadbeef\n";
+        let s = parse_status_v2(out);
+        assert!(s.branch.is_none());
+        assert!(s.upstream.is_none());
+    }
+
+    // ─── LogEntry / LogResponse (serialization) ───────────────────────
+
+    #[test]
+    fn test_log_entry_serialize() {
+        let e = LogEntry {
+            sha: "abc1234".to_string(),
+            message: "fix: handle nil pointer".to_string(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(obj_len(&v), 2);
+        assert_eq!(v["sha"], "abc1234");
+        assert_eq!(v["message"], "fix: handle nil pointer");
+    }
+
+    #[test]
+    fn test_log_response_serialize_empty() {
+        let resp = LogResponse { commits: vec![] };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(obj_len(&v), 1);
+        assert_eq!(v["commits"], serde_json::Value::Array(vec![]));
+    }
+
+    #[test]
+    fn test_log_response_serialize_with_commits() {
+        let resp = LogResponse {
+            commits: vec![
+                LogEntry {
+                    sha: "abc1234".to_string(),
+                    message: "first".to_string(),
+                },
+                LogEntry {
+                    sha: "def5678".to_string(),
+                    message: "second".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["commits"].as_array().unwrap().len(), 2);
+        assert_eq!(v["commits"][0]["sha"], "abc1234");
+        assert_eq!(v["commits"][1]["message"], "second");
+    }
+
+    // ─── parse_log_oneline ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_log_oneline_normal() {
+        let out = "abc1234 fix: handle nil pointer\n\
+                   def5678 feat: add login page\n\
+                   cafebabe initial commit\n";
+        let commits = parse_log_oneline(out);
+        assert_eq!(commits.len(), 3);
+        assert_eq!(commits[0].sha, "abc1234");
+        assert_eq!(commits[0].message, "fix: handle nil pointer");
+        assert_eq!(commits[1].sha, "def5678");
+        assert_eq!(commits[1].message, "feat: add login page");
+        assert_eq!(commits[2].sha, "cafebabe");
+        assert_eq!(commits[2].message, "initial commit");
+    }
+
+    #[test]
+    fn test_parse_log_oneline_empty() {
+        assert!(parse_log_oneline("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_log_oneline_skips_blank_lines() {
+        let out = "abc1234 msg\n\n\ndef5678 msg2\n";
+        let commits = parse_log_oneline(out);
+        assert_eq!(commits.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_log_oneline_message_with_spaces() {
+        let out = "abc1234 fix: handle nil pointer in parser\n";
+        let commits = parse_log_oneline(out);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].sha, "abc1234");
+        assert_eq!(commits[0].message, "fix: handle nil pointer in parser");
+    }
+
+    #[test]
+    fn test_parse_log_oneline_trailing_newline() {
+        let out = "abc1234 msg\n";
+        let commits = parse_log_oneline(out);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].sha, "abc1234");
+    }
+
+    #[test]
+    fn test_parse_log_oneline_skips_sha_only_line() {
+        // A line with no space (just a sha) is skipped — can't split sha/msg.
+        let out = "abc1234\n";
+        let commits = parse_log_oneline(out);
+        assert!(commits.is_empty());
+    }
+
+    // ─── parse_owner_repo ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_owner_repo_ssh_with_git() {
+        assert_eq!(
+            parse_owner_repo("git@github.com:acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_ssh_without_git() {
+        assert_eq!(
+            parse_owner_repo("git@github.com:acme/widget"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_https_with_git() {
+        assert_eq!(
+            parse_owner_repo("https://github.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_https_without_git() {
+        assert_eq!(
+            parse_owner_repo("https://github.com/acme/widget"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_https_with_credentials() {
+        // Embedded user:token@ creds are dropped — only owner/repo kept.
+        assert_eq!(
+            parse_owner_repo("https://user:token@github.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_http_scheme() {
+        assert_eq!(
+            parse_owner_repo("http://github.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_trims_whitespace() {
+        assert_eq!(
+            parse_owner_repo("  git@github.com:acme/widget.git  \n"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_owner_repo_invalid_ssh_no_path() {
+        assert_eq!(parse_owner_repo("git@github.com:widget"), None);
+    }
+
+    #[test]
+    fn test_parse_owner_repo_invalid_garbage() {
+        assert_eq!(parse_owner_repo("not a url at all"), None);
+    }
+
+    #[test]
+    fn test_parse_owner_repo_empty() {
+        assert_eq!(parse_owner_repo(""), None);
+    }
+
+    #[test]
+    fn test_parse_owner_repo_https_no_path() {
+        assert_eq!(parse_owner_repo("https://github.com/"), None);
+    }
+
+    #[test]
+    fn test_parse_owner_repo_https_host_only() {
+        assert_eq!(parse_owner_repo("https://github.com"), None);
+    }
+
+    #[test]
+    fn test_parse_owner_repo_gitlab_https() {
+        // Non-GitHub host still parses owner/repo; the GitHub API call
+        // would fail downstream, which is the caller's concern.
+        assert_eq!(
+            parse_owner_repo("https://gitlab.com/acme/widget.git"),
+            Some(("acme".to_string(), "widget".to_string()))
+        );
     }
 
     // ─── helper ────────────────────────────────────────────────────────
