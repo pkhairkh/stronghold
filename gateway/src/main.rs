@@ -59,6 +59,9 @@ enum Commands {
         /// Address to bind on
         #[arg(long, default_value = "0.0.0.0:8443")]
         bind: String,
+        /// Run in development mode (skips SEV-SNP check)
+        #[arg(long)]
+        dev: bool,
     },
 
     /// Generate SEV-SNP attestation report (for verification)
@@ -91,9 +94,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Serve { bind }) => {
+        Some(Commands::Serve { bind, dev }) => {
             tracing::info!("Starting Stronghold Gateway on {}", bind);
-            serve(&bind).await
+            serve(&bind, dev).await
         }
         Some(Commands::Attestation) => {
             tracing::info!("Generating SEV-SNP attestation report");
@@ -148,6 +151,7 @@ async fn serve(bind_addr: &str, dev: bool) -> Result<()> {
 
     // Build TLS server config with X25519MLKEM768 hybrid
     let tls_config = crypto::tls::build_server_config_from_files(keys_dir)?;
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls_config);
     tracing::info!("TLS configured with X25519MLKEM768 hybrid PQ key exchange");
 
     // Build the axum router
@@ -158,7 +162,7 @@ async fn serve(bind_addr: &str, dev: bool) -> Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
     tracing::info!("Gateway listening on https://{}", bind_addr);
 
-    axum_server::bind_rustls(addr, tls_config)
+    axum_server::bind_rustls(addr, rustls_config)
         .serve(app.into_make_service())
         .await?;
 
