@@ -4,7 +4,7 @@
 //! Uses kube-rs to communicate with the k3s API server.
 
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 use kube::api::{Api, DeleteParams, ListParams};
 use kube::Client as KubeClient;
 use std::env;
@@ -34,6 +34,97 @@ async fn get_kube_client() -> Result<KubeClient> {
     }
 }
 
+/// Build the shared workspace PVC name for a tenant.
+///
+/// All agents belonging to the same tenant share a single PVC named
+/// `work-{tenant_id}`, mounted at `/home/dev/work`. Different tenants get
+/// different PVCs, providing workspace isolation between tenants. The
+/// tenant identifier is sanitized to RFC 1123 subdomain rules (lowercase
+/// alphanumeric and `-`) so arbitrary tenant identifiers remain valid
+/// Kubernetes object names.
+fn pvc_name_for_tenant(tenant_id: &str) -> String {
+    let sanitized: String = tenant_id
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    // Fall back to a stable name if sanitization left nothing (e.g. tenant_id
+    // was "---"); avoids producing an invalid "work-" name.
+    let name = if trimmed.is_empty() { "tenant" } else { trimmed };
+    format!("work-{}", name)
+}
+
+/// Ensure the shared workspace PVC for a tenant exists, creating it if not.
+///
+/// Checks for `pvc_name` in the default namespace. If absent, creates a 10Gi
+/// PVC bound to the `local-path` storage class (k3s default; override with the
+/// `WORK_STORAGE_CLASS` env var) with `ReadWriteOnce` access.
+///
+/// **Note:** `local-path` only supports `ReadWriteOnce`, so concurrent pods
+/// for the same tenant must be co-located on a single node. For true
+/// multi-node RWX (read-write-many) collaboration, deploy an NFS or Longhorn
+/// storage class and set `WORK_STORAGE_CLASS` accordingly.
+async fn ensure_pvc(client: &KubeClient, pvc_name: &str) -> Result<()> {
+    let pvcs: Api<PersistentVolumeClaim> = Api::default_namespaced(client.clone());
+
+    // Fast path: PVC already exists for this tenant.
+    match pvcs.get(pvc_name).await {
+        Ok(_) => {
+            tracing::debug!(pvc = pvc_name, "Shared workspace PVC already exists");
+            return Ok(());
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            // Not found — create it below.
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("checking workspace PVC {}", pvc_name));
+        }
+    }
+
+    let storage_class =
+        env::var("WORK_STORAGE_CLASS").unwrap_or_else(|_| "local-path".to_string());
+
+    let pvc: PersistentVolumeClaim = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": pvc_name,
+            "labels": {
+                "app": "stronghold-agent",
+                "stronghold.dev/shared-workspace": "true"
+            }
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "storageClassName": storage_class,
+            "resources": {
+                "requests": {
+                    "storage": "10Gi"
+                }
+            }
+        }
+    }))?;
+
+    pvcs.create(&Default::default(), &pvc)
+        .await
+        .with_context(|| format!("creating workspace PVC {}", pvc_name))?;
+
+    tracing::info!(
+        pvc = pvc_name,
+        storage_class = %storage_class,
+        "Created shared workspace PVC"
+    );
+
+    Ok(())
+}
+
 /// Schedule a pod on a worker with available capacity.
 pub async fn schedule(
     state: &AppState,
@@ -57,6 +148,13 @@ pub async fn schedule(
 
     // Get k8s client
     let client = get_kube_client().await?;
+
+    // Ensure the shared workspace PVC exists for this tenant. All agents for
+    // the same tenant mount this PVC at /home/dev/work, enabling multi-agent
+    // collaboration. Different tenants get different PVCs (isolation).
+    let work_pvc = pvc_name_for_tenant(tenant_id);
+    ensure_pvc(&client, &work_pvc).await?;
+
     let pods: Api<Pod> = Api::default_namespaced(client);
 
     // Build pod spec
@@ -99,7 +197,7 @@ pub async fn schedule(
                 ]
             }],
             "volumes": [
-                {"name": "work", "emptyDir": {}},
+                {"name": "work", "persistentVolumeClaim": {"claimName": &work_pvc}},
                 {"name": "cache", "emptyDir": {}}
             ],
             "restartPolicy": "Never"
@@ -427,5 +525,33 @@ mod tests {
         assert_eq!(env_vars.len(), 1);
         assert_eq!(env_vars[0]["name"], "GITHUB_TOKEN");
         assert_eq!(env_vars[0]["value"], "ghp_secret_token");
+    }
+
+    #[test]
+    fn test_pvc_name_for_tenant_basic() {
+        assert_eq!(pvc_name_for_tenant("acme"), "work-acme");
+    }
+
+    #[test]
+    fn test_pvc_name_for_tenant_sanitizes_invalid_chars() {
+        // Uppercase, underscores, and punctuation are normalized to RFC 1123.
+        assert_eq!(pvc_name_for_tenant("Acme_Corp!"), "work-acme-corp");
+    }
+
+    #[test]
+    fn test_pvc_name_for_tenant_isolates_tenants() {
+        // Different tenants must map to different PVC names so workspaces
+        // are isolated between tenants.
+        assert_ne!(
+            pvc_name_for_tenant("tenant-a"),
+            pvc_name_for_tenant("tenant-b")
+        );
+    }
+
+    #[test]
+    fn test_pvc_name_for_tenant_empty_after_sanitize() {
+        // A tenant id that sanitizes to nothing must still produce a valid
+        // (non-empty) Kubernetes object name.
+        assert_eq!(pvc_name_for_tenant("---"), "work-tenant");
     }
 }
