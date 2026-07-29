@@ -65,6 +65,7 @@ pub use crate::routes::roles::{
 /// - `GET    /admin/constitution`    — [`get_constitution`]
 pub fn role_routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
+    use crate::routes::roles;
     axum::Router::<AppState>::new()
         .route(
             "/admin/roles",
