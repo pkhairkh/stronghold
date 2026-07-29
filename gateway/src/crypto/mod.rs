@@ -9,4 +9,5 @@
 pub mod hybrid_kem;
 pub mod hybrid_sig;
 pub mod tls;
+pub mod vault;
 pub mod webauthn;
