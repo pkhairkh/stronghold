@@ -14,6 +14,7 @@ pub mod credentials;
 pub mod exec;
 pub mod git;
 pub mod instruct;
+pub mod messages;
 pub mod metrics;
 pub mod phone;
 pub mod pty;
@@ -161,6 +162,10 @@ pub fn build_router(
         .route("/workflow", axum::routing::get(workflows::list_workflows))
         .route("/workflow/:id/run", axum::routing::post(workflows::run_workflow))
         .route("/workflow/run/:id", axum::routing::get(workflows::get_run))
+        // Agent-to-agent message bus
+        .route("/agent/:machine_id/messages", axum::routing::post(messages::post_message))
+        .route("/agent/:machine_id/messages", axum::routing::get(messages::poll_messages))
+        .route("/agent/:machine_id/messages/stream", axum::routing::get(messages::stream_messages))
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))
