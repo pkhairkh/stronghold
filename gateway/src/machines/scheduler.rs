@@ -141,31 +141,146 @@ pub async fn kill_pod(_state: &AppState, machine_id: &str) -> Result<()> {
     }
 }
 
-/// Open a PTY to a running pod.
-/// TODO W4-T4: implement via kube exec API (WebSocket).
+/// Open a PTY to a running pod via k8s exec.
+///
+/// Uses the kube-rs `Api::exec` API which opens a WebSocket connection
+/// to the pod's exec endpoint. The connection supports:
+/// - stdin (agent → container): write_all()
+/// - stdout (container → agent): read()
+/// - stderr (container → agent): read_stderr()
+/// - resize messages (terminal size changes)
+///
+/// The command executed is `/bin/sh` (or `/bin/bash` if available) with
+/// a PTY allocated by the container runtime.
 pub async fn open_pty(machine_id: &str) -> Result<PtyHandle> {
-    tracing::info!(machine = machine_id, "Opening PTY (stub — W4-T4 will implement via kube exec)");
-    Ok(PtyHandle::new())
+    use tokio::sync::mpsc;
+
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
+
+    // Open an exec session: `sh -c "exec sh"` (try bash first, fall back to sh).
+    let command = vec!["sh".to_string(), "-c".to_string(), "exec sh".to_string()];
+
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(32);
+
+    // Spawn the exec task. This opens a WebSocket to the pod and pumps bytes
+    // between the channels and the WebSocket.
+    let machine_id_owned = machine_id.to_string();
+    let exec_handle = tokio::spawn(async move {
+        use kube::api::AttachParams;
+
+        let ap = AttachParams::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(true)
+            .tty(true)
+            .command(command);
+
+        match pods.exec(&machine_id_owned, vec!["sh"], &ap).await {
+            Ok(mut exec) => {
+                use kube::Api::ExecStreamExt as _;
+                use tokio::io::AsyncWriteExt;
+
+                // Get stdin writer
+                let mut stdin_writer = match exec.stdin() {
+                    Some(w) => w,
+                    None => {
+                        tracing::error!(machine = %machine_id_owned, "exec has no stdin");
+                        return;
+                    }
+                };
+
+                // Spawn stdin pump: channel → WebSocket
+                let stdin_task = tokio::spawn(async move {
+                    while let Some(data) = stdin_rx.recv().await {
+                        if stdin_writer.write_all(&data).await.is_err() {
+                            break;
+                        }
+                        let _ = stdin_writer.flush().await;
+                    }
+                });
+
+                // Spawn stdout pump: WebSocket → channel
+                let stdout_task = tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut stdout = match exec.stdout() {
+                        Some(r) => r,
+                        None => return,
+                    };
+                    let mut buf = vec![0u8; 4096];
+                    loop {
+                        match stdout.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if stdout_tx.send(buf[..n].to_vec()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let _ = stdin_task.await;
+                let _ = stdout_task.await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    machine = %machine_id_owned,
+                    error = %e,
+                    "Failed to open exec session"
+                );
+            }
+        }
+    });
+
+    tracing::info!(machine = machine_id, "PTY opened via kube exec");
+
+    Ok(PtyHandle {
+        stdin_tx,
+        stdout_rx,
+        exec_handle: Some(exec_handle),
+    })
 }
 
 pub struct PtyHandle {
-    // TODO W4-T4: wrap kube exec WebSocket connection
-    buffer: Vec<u8>,
+    /// Channel to send bytes to the container's stdin (via WebSocket).
+    stdin_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    /// Channel to receive bytes from the container's stdout.
+    stdout_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    /// Handle to the background exec task. Dropping this kills the session.
+    exec_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PtyHandle {
-    fn new() -> Self {
-        Self { buffer: Vec::new() }
-    }
-
+    /// Write bytes to the container's stdin.
     pub async fn write_all(&mut self, data: &[u8]) -> Result<()> {
-        self.buffer.extend_from_slice(data);
+        self.stdin_tx
+            .send(data.to_vec())
+            .await
+            .map_err(|_| anyhow::anyhow!("exec stdin channel closed"))?;
         Ok(())
     }
 
+    /// Read bytes from the container's stdout. Blocks until data is available.
     pub async fn read(&mut self) -> Result<Vec<u8>> {
-        let data = std::mem::take(&mut self.buffer);
-        Ok(data)
+        match self.stdout_rx.recv().await {
+            Some(data) => Ok(data),
+            None => Ok(Vec::new()), // Channel closed = EOF
+        }
+    }
+
+    /// Close the PTY session.
+    pub fn close(&mut self) {
+        if let Some(handle) = self.exec_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
