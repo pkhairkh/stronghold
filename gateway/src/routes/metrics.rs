@@ -15,7 +15,13 @@ use axum::response::IntoResponse;
 
 /// GET `/metrics` — return Prometheus-format metrics text.
 pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db.get().unwrap();
+    let conn = match state.db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "DB pool exhausted in /metrics");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "DB pool exhausted".to_string());
+        }
+    };
     let active_sessions: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM machines WHERE status = 'active'",
