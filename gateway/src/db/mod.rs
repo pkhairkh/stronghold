@@ -159,11 +159,11 @@ mod tests {
         let pool2 = init_pool(db_path.to_str().unwrap()).unwrap();
         let conn = pool2.get().unwrap();
 
-        // _migrations should show exactly 1 migration applied.
+        // _migrations should show exactly 2 migrations applied.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
     }
 
     #[test]
