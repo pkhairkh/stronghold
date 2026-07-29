@@ -88,7 +88,7 @@ pub fn build_router(
     db_pool: Pool<SqliteConnectionManager>,
     audit_keys: AuditKeys,
     push_keys: PushKeys,
-) -> Router {
+) -> (Router, AppState) {
     let state = AppState {
         db: db_pool,
         audit_keys,
@@ -195,5 +195,6 @@ pub fn build_router(
         //    responses — including 503s from the concurrency limiter — are
         //    logged.
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state.clone());
+    (router, state)
 }

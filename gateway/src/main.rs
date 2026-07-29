@@ -30,6 +30,7 @@ mod routes;
 mod sessions;
 mod tee;
 mod tenants;
+mod watchdog;
 mod workflow;
 
 /// Stronghold Gateway command-line interface
@@ -156,7 +157,10 @@ async fn serve(bind_addr: &str, dev: bool) -> Result<()> {
     tracing::info!("TLS configured with X25519MLKEM768 hybrid PQ key exchange");
 
     // Build the axum router
-    let app = routes::build_router(db_pool, audit_keys, push_keys);
+    let (app, app_state) = routes::build_router(db_pool, audit_keys, push_keys);
+
+    // Start the watchdog monitoring loop as a background task
+    watchdog::monitor::spawn_watchdog(app_state);
 
     // Serve with TLS via axum-server
     let addr: std::net::SocketAddr = bind_addr.parse()
