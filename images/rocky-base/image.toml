@@ -1,62 +1,126 @@
-# Stronghold Rocky Base Image
+# Stronghold Rocky Base Image — finetuned foundation for every agent workspace.
 #
 # This is the universal root for all Stronghold images. Every other image
-# in the catalog `extends` from this one.
+# in the catalog (rust-stable, rust-nightly, python-ml, fullstack, ...)
+# `extends` from this one.
 #
 # Built on Rocky Linux 9 minimal — RHEL-compatible ABI, 10-year support
 # lifecycle, dnf5 package manager.
+#
+# What this image provides out of the box (so agents don't waste a task
+# installing toolchains):
+#   - Rocky Linux 9 + EPEL + CRB repos
+#   - Build essentials: gcc, gcc-c++, make, cmake, pkg-config, binutils
+#   - Dev libraries: openssl-devel, sqlite-devel, zlib-devel, libffi-devel
+#   - Git (with global identity + safe.directory pre-configured)
+#   - Editors: vim, helix (when available), nano
+#   - Shells: fish (default for dev user), bash
+#   - CLI utilities: ripgrep, fd-find, jq, fzf, bat, tree, less, htop, tmux
+#   - Network: curl, wget, openssh-clients, rsync, httpie (when available)
+#   - The Stronghold agent SDK (stronghold-agent.sh) at /usr/local/bin/
+#   - kubectl + websocat (for the SDK's stronghold_shell function)
+#   - Properly configured locale (en_US.UTF-8) so setlocale warnings go away
+#   - Non-root `dev` user (UID 1000) with sudo + git identity + workspace
 
 name = "rocky-base"
 extends = ""  # root image — no parent
-description = "Rocky Linux 9 minimal base with essential dev tools"
+description = "Rocky Linux 9 + build essentials + Stronghold agent SDK (universal foundation)"
 
 [packages]
 dnf = [
-    "dnf5",
+    # ── Build essentials ────────────────────────────────────────────────
+    "gcc",
+    "gcc-c++",
+    "make",
+    "cmake",
+    "pkgconf-pkg-config",
+    "binutils",
+    "kernel-headers",
+    "glibc-devel",
+    "libtool",
+    "autoconf",
+    "automake",
+    # ── Dev libraries (common Rust/C build deps) ───────────────────────
+    "openssl-devel",
+    "sqlite-devel",
+    "zlib-devel",
+    "libffi-devel",
+    "libxml2-devel",
+    "libxslt-devel",
+    # ── Git + SSH ───────────────────────────────────────────────────────
     "git",
-    "curl",
-    "wget",
     "openssh-clients",
-    "rsync",
-    "jq",
-    "httpie",
+    "openssh-server",
+    # ── Editors ─────────────────────────────────────────────────────────
     "vim",
-    "helix",
-    "tmux",
-    "htop",
-    "btop",
+    "vim-default-editor",
+    "nano",
+    # ── Shells ──────────────────────────────────────────────────────────
     "fish",
     "bash",
-    "sudo",
-    "procps-ng",
-    "findutils",
+    "bash-completion",
+    # ── CLI utilities ───────────────────────────────────────────────────
     "ripgrep",
     "fd-find",
+    "jq",
+    "fzf",
+    "bat",
     "tree",
     "less",
     "man-db",
+    "tmux",
+    "htop",
+    "procps-ng",
+    "findutils",
     "ca-certificates",
     "tzdata",
+    "rsync",
+    "wget",
+    "curl",
+    "sudo",
+    "python3",
+    "python3-pip",
+    # ── Network debug ───────────────────────────────────────────────────
+    "iproute",
+    "iputils",
+    "bind-utils",
+    "nmap-ncat",
+    "tcpdump",
 ]
 apt = []  # alias for dnf on rocky; ignored
 
 [env]
 HOME = "/home/dev"
-PATH = "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin"
+PATH = "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/home/dev/.cargo/bin"
 LANG = "en_US.UTF-8"
 LC_ALL = "en_US.UTF-8"
 TZ = "UTC"
-EDITOR = "helix"
+EDITOR = "vim"
 SHELL = "/usr/bin/fish"
+CARGO_HOME = "/home/dev/.cargo"
+RUSTUP_HOME = "/home/dev/.rustup"
 
 [post_install]
 commands = [
-    "sudo dnf clean all",
+    # Clean dnf cache
+    "dnf clean all",
     "rm -rf /var/cache/dnf",
+    # Create the dev user (UID 1000, fish shell)
     "useradd -m -s /usr/bin/fish -u 1000 dev",
     "echo 'dev ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/dev",
-    "mkdir -p /home/dev/work /home/dev/.cache",
+    "chmod 0440 /etc/sudoers.d/dev",
+    # Create workspace + cache dirs
+    "mkdir -p /home/dev/work /home/dev/.cache /home/dev/.cargo /home/dev/.rustup",
     "chown -R dev:dev /home/dev",
+    # Configure git globally for the dev user — agents commit without setup
+    "mkdir -p /home/dev/.config/git",
+    "printf '[user]\\n\\temail = agent@stronghold.dev\\n\\tname = Stronghold Agent\\n[safe]\\n\\tdirectory = *\\n[init]\\n\\tdefaultBranch = main\\n' > /home/dev/.config/git/config",
+    "chown -R dev:dev /home/dev/.config",
+    # Install glibc locale (en_US.UTF-8) so setlocale warnings go away
+    "dnf -y install glibc-langpack-en || true",
+    # Install kubectl + websocat (for the Stronghold agent SDK)
+    "curl -sSL 'https://dl.k8s.io/release/v1.36.2/bin/linux/amd64/kubectl' -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl",
+    "curl -sSL 'https://github.com/nickelc/websocat/releases/download/v1.13.0/websocat.x86_64-unknown-linux-musl' -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat",
 ]
 
 [inject_containerfile]
@@ -69,6 +133,7 @@ snippets = [
 
 [labels]
 "org.opencontainers.image.title" = "stronghold/rocky-base"
-"org.opencontainers.image.description" = "Rocky Linux 9 minimal base for Stronghold agent workspaces"
+"org.opencontainers.image.description" = "Rocky Linux 9 + build essentials + Stronghold agent SDK (universal foundation)"
 "org.opencontainers.image.licenses" = "Apache-2.0"
 "org.opencontainers.image.source" = "https://github.com/pkhairkh/stronghold"
+"stronghold.dev/image-version" = "2.0"

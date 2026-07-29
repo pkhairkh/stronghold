@@ -9,8 +9,8 @@ description = "Rocky 9 + Rust nightly + common cross-targets + Lean 4"
 
 [packages]
 dnf = [
-    "qemu-user-static",
-    "libgmp-devel",
+    # qemu-user not packaged on Rocky 9 — agents install from source if needed
+    "gmp-devel",           # GMP headers for Lean
     "openssl-devel",
     "cmake",
     "make",
@@ -22,7 +22,7 @@ dnf = [
 
 [toolchains.rust]
 channel = "nightly"
-date = "2026-03-01"
+# date = "2026-03-01"  # omit to get the latest nightly
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -32,7 +32,6 @@ components = ["rust-src", "rustfmt", "clippy", "miri"]
 
 [toolchains.elan]
 channel = "leanprover/lean4:stable"
-date = "2026-02-15"
 
 [env]
 CARGO_TARGET_DIR = "{home}/target"
@@ -40,14 +39,12 @@ RUSTFLAGS = "-C target-cpu=native"
 RUST_BACKTRACE = "1"
 CARGO_INCREMENTAL = "1"
 
-[pre_install]
-commands = [
-    "curl -sSfL https://wasmtime.dev/install.sh | bash -s -- --version 47.0"
-]
+# pre_install removed — wasmtime install script 404s on the pinned version.
+# Agents can install wasmtime themselves if needed.
 
 [post_install]
 commands = [
-    "sudo dnf clean all",
+    "dnf clean all",
     "rm -rf /var/cache/dnf",
 ]
 
