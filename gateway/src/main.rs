@@ -109,15 +109,21 @@ async fn main() -> Result<()> {
         }
         None => {
             tracing::info!("Starting Stronghold Gateway on {}", cli.bind);
-            serve(&cli.bind).await
+            serve(&cli.bind, cli.dev).await
         }
     }
 }
 
 /// Run the gateway server
-async fn serve(bind_addr: &str) -> Result<()> {
+///
+/// In production mode: verifies SEV-SNP, loads TLS cert, serves HTTPS.
+/// In dev mode (`dev=true`): skips SEV-SNP check, auto-generates self-signed
+/// cert if missing, serves HTTPS with self-signed cert.
+async fn serve(bind_addr: &str, dev: bool) -> Result<()> {
     // Verify SEV-SNP is available (unless --dev)
-    if !std::env::var("STRONGHOLD_DEV").is_ok() {
+    if dev {
+        tracing::warn!("Running in dev mode — SEV-SNP check skipped");
+    } else {
         tee::verify_sev_snp_available()?;
     }
 
@@ -132,18 +138,29 @@ async fn serve(bind_addr: &str) -> Result<()> {
         crypto::hybrid_kem::PushKeys::load_or_generate_keys("/var/lib/stronghold/keys/")?;
     tracing::info!("Cryptographic keys loaded");
 
+    // Ensure TLS certificate exists (auto-generate if missing)
+    let keys_dir = "/var/lib/stronghold/keys";
+    let cert_path = format!("{}/tls.crt", keys_dir);
+    if !std::path::Path::new(&cert_path).exists() {
+        tracing::info!("TLS certificate not found — generating self-signed cert");
+        crypto::tls::generate_self_signed_cert_files(keys_dir, "localhost")?;
+    }
+
+    // Build TLS server config with X25519MLKEM768 hybrid
+    let tls_config = crypto::tls::build_server_config_from_files(keys_dir)?;
+    tracing::info!("TLS configured with X25519MLKEM768 hybrid PQ key exchange");
+
     // Build the axum router
     let app = routes::build_router(db_pool, audit_keys, push_keys);
 
-    // Configure TLS (X25519MLKEM768 hybrid).
-    // TODO W4-T: wire tls_config into the axum server and load real cert from /etc/stronghold/keys/.
-    // For now, skip TLS config in dev mode (no cert available).
-    let _tls_config = crypto::tls::build_client_config();
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    tracing::info!("Gateway listening on {}", bind_addr);
+    // Serve with TLS via axum-server
+    let addr: std::net::SocketAddr = bind_addr.parse()
+        .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
+    tracing::info!("Gateway listening on https://{}", bind_addr);
 
-    // Serve with TLS
-    axum::serve(listener, app.into_make_service()).await?;
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await?;
 
     Ok(())
 }
