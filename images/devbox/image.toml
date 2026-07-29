@@ -1,0 +1,71 @@
+# Stronghold Devbox Image
+#
+# Extends rocky-base with the stronghold repo pre-cloned + the gateway binary
+# pre-built. For fast inner-loop development — agents can spin up a devbox,
+# hack on the gateway, rebuild, and test without re-cloning + re-compiling
+# from scratch every time.
+#
+# The repo is cloned to /home/dev/work/stronghold. The gateway binary is
+# pre-built at /home/dev/work/stronghold/target/debug/stronghold-gateway.
+#
+# Agents can use this image when they need to:
+# - Modify the gateway itself (inner-loop dev)
+# - Run integration tests against a fresh gateway
+# - Debug a gateway issue with full source context
+
+name = "devbox"
+extends = "rocky-base"
+description = "Rocky 9 + stronghold repo pre-cloned + gateway binary pre-built (inner-loop dev)"
+
+[packages]
+dnf = [
+    # rust-stable's packages, minus the cross-target toolchain (devbox only
+    # needs to build for the host arch)
+    "openssl-devel",
+    "cmake",
+    "make",
+    "gcc",
+    "gcc-c++",
+    "pkgconf-pkg-config",
+    "python3",
+]
+
+[toolchains.rust]
+channel = "stable"
+targets = [
+    "x86_64-unknown-linux-gnu",
+]
+components = ["rust-src", "rustfmt", "clippy"]
+
+[env]
+CARGO_TARGET_DIR = "{home}/target"
+RUST_BACKTRACE = "1"
+CARGO_INCREMENTAL = "1"
+# Point the agent SDK at the dev-mode gateway running on localhost
+STRONGHOLD_URL = "https://localhost:8443"
+STRONGHOLD_CURL_FLAGS = "-sk"
+
+[pre_install]
+commands = [
+    # Clone the stronghold repo as the dev user (shallow clone, depth 1)
+    "su - dev -s /bin/bash -c 'git clone --depth 1 https://github.com/pkhairkh/stronghold.git /home/dev/work/stronghold'",
+]
+
+[post_install]
+commands = [
+    # Pre-build the gateway binary (debug mode, no-sev-snp feature for dev)
+    # This takes ~3 minutes but saves every agent from re-compiling.
+    "su - dev -s /bin/bash -c 'cd /home/dev/work/stronghold && cargo build --bin stronghold-gateway --features no-sev-snp 2>&1 | tail -3'",
+    # Also build the CLI binary
+    "su - dev -s /bin/bash -c 'cd /home/dev/work/stronghold && cargo build --bin stronghold 2>&1 | tail -3'",
+    # Verify the binaries exist
+    "ls -la /home/dev/work/stronghold/target/debug/stronghold-gateway /home/dev/work/stronghold/target/debug/stronghold",
+    "dnf clean all",
+    "rm -rf /var/cache/dnf",
+]
+
+[labels]
+"org.opencontainers.image.title" = "stronghold/devbox"
+"org.opencontainers.image.description" = "Stronghold repo pre-cloned + gateway binary pre-built for inner-loop dev"
+"stronghold.dev/image-type" = "devbox"
+"stronghold.dev/pre-built-bins" = "stronghold-gateway, stronghold"

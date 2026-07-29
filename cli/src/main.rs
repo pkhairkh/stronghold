@@ -182,19 +182,39 @@ enum AgentTokenCommands {
 
 #[derive(Subcommand)]
 enum ImageCommands {
-    /// Build an OCI image from an image.toml file
+    /// Build an OCI image from an image.toml spec (calls POST /admin/images/build)
     Build {
-        /// Path to image.toml (or a directory containing image.toml)
+        /// Image name (e.g. "rocky-base", "rust-stable") — must match a
+        /// directory under images/ in the stronghold repo
         #[arg(long)]
-        path: String,
+        name: String,
         /// Optional tag (defaults to "latest")
         #[arg(long)]
         tag: Option<String>,
     },
-    /// List images in the catalog
+    /// List all repositories in the Stronghold registry (GET /admin/images)
     List,
-    /// Push an image to the registry
+    /// Push a local image to the registry (POST /admin/images/push)
     Push {
+        /// Local image name (e.g. "stronghold/rocky-base:latest")
+        #[arg(long)]
+        image: String,
+    },
+    /// Pull an image from the registry into k3s containerd (POST /admin/images/pull)
+    Pull {
+        /// Image reference (e.g. "stronghold/rocky-base:latest")
+        #[arg(long)]
+        image: String,
+    },
+    /// List tags for a repository (GET /admin/images/:name/tags)
+    Tags {
+        /// Repository name (e.g. "rocky-base")
+        #[arg(long)]
+        name: String,
+    },
+    /// Check if an image exists in the registry (GET /admin/images/:name/exists)
+    Exists {
+        /// Repository name (e.g. "rocky-base")
         #[arg(long)]
         name: String,
     },
@@ -561,41 +581,62 @@ struct RevokeAgentTokenRequest {
 
 #[derive(Debug, Serialize)]
 struct BuildImageRequest {
-    /// Raw image.toml contents
-    image_toml: String,
+    name: String,
+    #[serde(default = "default_tag")]
     tag: String,
+}
+
+fn default_tag() -> String {
+    "latest".to_string()
 }
 
 #[derive(Debug, Deserialize)]
 struct BuildImageResponse {
-    digest: String,
-    tag: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImageInfo {
-    name: String,
-    #[serde(default)]
-    tag: String,
-    #[serde(default)]
-    digest: String,
-    #[serde(default)]
-    description: String,
+    image: String,
+    status: String,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ImageListResponse {
-    images: Vec<ImageInfo>,
+    repositories: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct PushImageRequest {
-    name: String,
+    image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PushImageResponse {
+    image: String,
+    registry_ref: String,
     digest: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PullImageRequest {
+    image: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PullImageResponse {
+    image: String,
+    digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListTagsResponse {
+    repository: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckExistsResponse {
+    image: String,
+    exists: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -921,77 +962,96 @@ async fn handle_image(action: &ImageCommands, cli: &Cli) -> Result<()> {
     let client = GatewayClient::from_settings(&settings)?;
 
     match action {
-        ImageCommands::Build { path, tag } => {
-            // Read the image.toml file locally so we can validate it before
-            // round-tripping to the gateway.
-            let path = std::path::Path::new(path);
-            let toml_path = if path.is_dir() {
-                path.join("image.toml")
-            } else {
-                path.to_path_buf()
-            };
-            if !toml_path.exists() {
-                return Err(anyhow!(
-                    "Image config not found: {}. \
-                     Pass a path to an image.toml file or a directory containing one.",
-                    toml_path.display()
-                ));
-            }
-            let image_toml = std::fs::read_to_string(&toml_path)
-                .with_context(|| format!("Failed to read {}", toml_path.display()))?;
-
-            // Validate locally by parsing.
-            let _parsed: serde_json::Value = toml::from_str(&image_toml).context(format!(
-                "Failed to parse {} as TOML",
-                toml_path.display()
-            ))?;
-
+        ImageCommands::Build { name, tag } => {
             let tag = tag.clone().unwrap_or_else(|| "latest".to_string());
-            let req = BuildImageRequest { image_toml, tag };
+            let req = BuildImageRequest {
+                name: name.clone(),
+                tag,
+            };
             let resp: BuildImageResponse = client
                 .send(
                     client
-                        .request(reqwest::Method::POST, "/admin/image/build")
+                        .request(reqwest::Method::POST, "/admin/images/build")
                         .json(&req),
                 )
                 .await?;
-
-            println!("Image built.");
-            println!("  Tag:    {}", resp.tag);
-            println!("  Digest: {}", resp.digest);
+            println!("✅ Image built");
+            println!("  Image:   {}", resp.image);
+            println!("  Status:  {}", resp.status);
+            println!("  Message: {}", resp.message);
         }
         ImageCommands::List => {
             let resp: ImageListResponse = client
-                .send(client.request(reqwest::Method::GET, "/admin/image"))
+                .send(client.request(reqwest::Method::GET, "/admin/images"))
                 .await?;
-
-            if resp.images.is_empty() {
-                println!("No images in catalog.");
+            if resp.repositories.is_empty() {
+                println!("No images in registry.");
                 return Ok(());
             }
-            println!("{:<32} {:<20} {}", "NAME", "TAG", "DIGEST");
-            for img in &resp.images {
-                let digest_short = if img.digest.len() > 24 {
-                    &img.digest[..24]
-                } else {
-                    &img.digest
-                };
-                println!("{:<32} {:<20} {}", img.name, img.tag, digest_short);
+            println!("Stronghold registry repositories:");
+            for repo in &resp.repositories {
+                println!("  • {}", repo);
             }
         }
-        ImageCommands::Push { name } => {
+        ImageCommands::Pull { image } => {
+            let req = PullImageRequest {
+                image: image.clone(),
+            };
+            let resp: PullImageResponse = client
+                .send(
+                    client
+                        .request(reqwest::Method::POST, "/admin/images/pull")
+                        .json(&req),
+                )
+                .await?;
+            println!("✅ Image pulled into k3s containerd");
+            println!("  Image:  {}", resp.image);
+            println!("  Digest: {}", resp.digest);
+        }
+        ImageCommands::Tags { name } => {
+            let resp: ListTagsResponse = client
+                .send(
+                    client
+                        .request(
+                            reqwest::Method::GET,
+                            &format!("/admin/images/{}/tags", name),
+                        ),
+                )
+                .await?;
+            println!("Tags for {}:", resp.repository);
+            for tag in &resp.tags {
+                println!("  • {}", tag);
+            }
+        }
+        ImageCommands::Exists { name } => {
+            let resp: CheckExistsResponse = client
+                .send(
+                    client
+                        .request(
+                            reqwest::Method::GET,
+                            &format!("/admin/images/{}/exists", name),
+                        ),
+                )
+                .await?;
+            println!("Image: {}", resp.image);
+            println!("  Exists: {}", resp.exists);
+        }
+        ImageCommands::Push { image } => {
             let req = PushImageRequest {
-                name: name.clone(),
+                image: image.clone(),
+                registry: None,
             };
             let resp: PushImageResponse = client
                 .send(
                     client
-                        .request(reqwest::Method::POST, "/admin/image/push")
+                        .request(reqwest::Method::POST, "/admin/images/push")
                         .json(&req),
                 )
                 .await?;
-            println!("Image pushed: {}", name);
-            println!("  Digest: {}", resp.digest);
+            println!("✅ Image pushed");
+            println!("  Image:        {}", resp.image);
+            println!("  Registry ref: {}", resp.registry_ref);
+            println!("  Digest:       {}", resp.digest);
         }
     }
     Ok(())
