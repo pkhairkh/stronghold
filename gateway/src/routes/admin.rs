@@ -35,18 +35,11 @@ use serde::{Deserialize, Serialize};
 // rather than declaring `pub mod roles;` in `routes/mod.rs` — this keeps
 // `mod.rs` untouched (the orchestrator wires routes there separately).
 // Everything in `roles` is re-exported under `admin::` so callers can address
-// handlers as either `admin::create_role` or `admin::roles::create_role`.
+// handlers as either `admin::create_role` or `crate::routes::roles::create_role`.
 
-#[path = "roles.rs"]
-mod roles;
-
-// `pub use` re-exports so callers can address role handlers as either
-// `crate::routes::admin::create_role` or `crate::routes::admin::roles::create_role`.
-// These are part of the module's public API — the `unused_imports` warning
-// would be a false positive (the items are consumed by external callers, not
-// internally), so we suppress it.
+// `pub use` re-exports so callers can address role handlers from admin module.
 #[allow(unused_imports)]
-pub use roles::{
+pub use crate::routes::roles::{
     check_tool_allowed, constitution, create_role, delete_role, get_constitution, get_role,
     list_roles, seed_roles, ConstitutionPrinciple, CreateRoleRequest, CreateRoleResponse,
     GetRoleResponse, ListRoleItem, ListRolesQuery, SeedRolesRequest, SeedRolesResponse,
