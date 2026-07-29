@@ -26,11 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation:** Threat model, protocol spec, image DSL, operations, deployment, SEV-SNP, crypto, 10 ADRs
 
 ### Known Issues
-- ML-DSA-65 signatures deferred (ml-dsa crate unstable)
-- WebAuthn PQC gap (FIDO authenticators not deployed yet)
-- SEV-SNP untested on real hardware (dev box lacks /dev/sev)
-- PTY proxy uses buffer stub (kube exec WebSocket deferred)
-- Self-signed cert generation deferred to bootstrap script
+- WebAuthn PQC gap (FIDO authenticators not deployed yet — hardware limitation, ~2027)
+- SEV-SNP untested on real hardware (dev box lacks /dev/sev; software key sealing tested)
+
+### Post-v1.0.0 Gap Fixes (all closed)
+- **ML-DSA-65**: Real post-quantum signatures via ml-dsa 0.1.1 crate (was deferred)
+- **PTY proxy**: Real k8s exec via kube-rs WebSocket with stdin/stdout/stderr/tty (was stub)
+- **Self-signed cert**: Auto-generation via rcgen 0.14 with ECDSA P-256 (was deferred)
 
 ## [0.1.0] - 2026-07-29
 
