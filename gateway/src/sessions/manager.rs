@@ -374,6 +374,7 @@ pub fn pending_approval_stream(
                     // Wrapped in a synchronous closure so all DB borrows are
                     // released before we yield (the pooled connection is
                     // returned to the pool once the closure exits).
+                    #[allow(clippy::type_complexity)]
                     let rows_result = (|| -> anyhow::Result<Vec<(
                         String,
                         Option<String>,
