@@ -8,7 +8,7 @@ description = "Rocky 9 + Lean 4 + lake for formal proofs"
 
 [packages]
 dnf = [
-    "libgmp-devel",
+    "gmp-devel",       # GMP headers for Lean (was libgmp-devel)
     "cmake",
     "make",
     "gcc",
@@ -17,19 +17,14 @@ dnf = [
 
 [toolchains.elan]
 channel = "leanprover/lean4:stable"
-date = "2026-02-15"
+# date omitted → latest stable
 
 [env]
 LEAN_PATH = "{home}/.elan/lib"
 
-[pre_install]
-commands = [
-    "curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none",
-]
-
 [post_install]
 commands = [
-    "sudo dnf clean all",
+    "dnf clean all",
     "rm -rf /var/cache/dnf",
 ]
 

@@ -341,21 +341,22 @@ stronghold_git_clone() {
   _stronghold_token_curl -X POST "$url" -d "$json"
 }
 
-# stronghold_git_branch MACHINE_ID NAME [--from REF]
+# stronghold_git_branch MACHINE_ID NAME [--from REF] [--path DIR]
 #
 # POST /agent/:machine_id/git/branch — create + check out a new branch.
 stronghold_git_branch() {
   if [ "$#" -lt 2 ]; then
-    echo "usage: stronghold_git_branch MACHINE_ID NAME [--from REF]" >&2
+    echo "usage: stronghold_git_branch MACHINE_ID NAME [--from REF] [--path DIR]" >&2
     return 2
   fi
   local machine_id="$1" name="$2"
   shift 2
-  local from=""
+  local from="" path=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --from) from="$2"; shift 2 ;;
-      -h|--help) echo "usage: stronghold_git_branch MACHINE_ID NAME [--from REF]"; return 0 ;;
+      --path) path="$2"; shift 2 ;;
+      -h|--help) echo "usage: stronghold_git_branch MACHINE_ID NAME [--from REF] [--path DIR]"; return 0 ;;
       *) echo "stronghold_git_branch: unknown option: $1" >&2; return 2 ;;
     esac
   done
@@ -366,25 +367,30 @@ stronghold_git_branch() {
   if [ -n "$from" ]; then
     json="$(printf '%s' "$json" | "$jq" --arg v "$from" '.from = $v')" || return 1
   fi
+  if [ -n "$path" ]; then
+    json="$(printf '%s' "$json" | "$jq" --arg v "$path" '.path = $v')" || return 1
+  fi
   _stronghold_token_curl -X POST "$url" -d "$json"
 }
 
-# stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...]
+# stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...] [--path DIR]
 #
 # POST /agent/:machine_id/git/commit — stage files and commit. With no `--`
 # files, stages everything (`git add -A`).
 stronghold_git_commit() {
   if [ "$#" -lt 2 ]; then
-    echo "usage: stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...]" >&2
+    echo "usage: stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...] [--path DIR]" >&2
     return 2
   fi
   local machine_id="$1" message="$2"
   shift 2
   local -a files=()
+  local path=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --path) path="$2"; shift 2 ;;
       --) shift; files=("$@"); break ;;
-      -h|--help) echo "usage: stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...]"; return 0 ;;
+      -h|--help) echo "usage: stronghold_git_commit MACHINE_ID MESSAGE [-- FILE ...] [--path DIR]"; return 0 ;;
       *) echo "stronghold_git_commit: unknown option: $1" >&2; return 2 ;;
     esac
   done
@@ -396,25 +402,29 @@ stronghold_git_commit() {
     files_json="$(_stronghold_array_to_json "${files[@]}")" || return 1
     json="$(printf '%s' "$json" | "$jq" --argjson f "$files_json" '.files = $f')" || return 1
   fi
+  if [ -n "$path" ]; then
+    json="$(printf '%s' "$json" | "$jq" --arg v "$path" '.path = $v')" || return 1
+  fi
   _stronghold_token_curl -X POST "$url" -d "$json"
 }
 
-# stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME]
+# stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME] [--path DIR]
 #
 # POST /agent/:machine_id/git/push — push to a remote (default origin / HEAD).
 stronghold_git_push() {
   if [ "$#" -lt 1 ]; then
-    echo "usage: stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME]" >&2
+    echo "usage: stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME] [--path DIR]" >&2
     return 2
   fi
   local machine_id="$1"
   shift
-  local remote="" branch=""
+  local remote="" branch="" path=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --remote) remote="$2"; shift 2 ;;
       --branch) branch="$2"; shift 2 ;;
-      -h|--help) echo "usage: stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME]"; return 0 ;;
+      --path)   path="$2";   shift 2 ;;
+      -h|--help) echo "usage: stronghold_git_push MACHINE_ID [--remote NAME] [--branch NAME] [--path DIR]"; return 0 ;;
       *) echo "stronghold_git_push: unknown option: $1" >&2; return 2 ;;
     esac
   done
@@ -427,6 +437,9 @@ stronghold_git_push() {
   fi
   if [ -n "$branch" ]; then
     json="$(printf '%s' "$json" | "$jq" --arg v "$branch" '.branch = $v')" || return 1
+  fi
+  if [ -n "$path" ]; then
+    json="$(printf '%s' "$json" | "$jq" --arg v "$path" '.path = $v')" || return 1
   fi
   _stronghold_token_curl -X POST "$url" -d "$json"
 }

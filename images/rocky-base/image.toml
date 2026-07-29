@@ -121,6 +121,10 @@ commands = [
     # Install kubectl + websocat (for the Stronghold agent SDK)
     "curl -sSL 'https://dl.k8s.io/release/v1.36.2/bin/linux/amd64/kubectl' -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl",
     "curl -sSL 'https://github.com/nickelc/websocat/releases/download/v1.13.0/websocat.x86_64-unknown-linux-musl' -o /usr/local/bin/websocat && chmod +x /usr/local/bin/websocat",
+    # Install the Stronghold agent SDK at /usr/local/bin/ so agents can
+    # `source /usr/local/bin/stronghold-agent.sh` without cloning the repo.
+    # The SDK file is copied into the build context by build_image.py.
+    "cp /tmp/stronghold-agent.sh /usr/local/bin/stronghold-agent.sh && chmod +x /usr/local/bin/stronghold-agent.sh",
 ]
 
 [inject_containerfile]

@@ -8,6 +8,7 @@ description = "Rocky 9 + Node.js 20 LTS + pnpm"
 
 [packages]
 dnf = [
+    "nodejs",       # installed via NodeSource repo (set up in pre_install)
     "gcc",
     "gcc-c++",
     "make",
@@ -28,7 +29,7 @@ commands = [
 [post_install]
 commands = [
     "npm install -g pnpm@9",
-    "sudo dnf clean all",
+    "dnf clean all",
     "rm -rf /var/cache/dnf",
 ]
 

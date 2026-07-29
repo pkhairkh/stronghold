@@ -142,24 +142,49 @@ def build_containerfile(name: str, spec: dict, parent_ref: str) -> str:
                 comp_str = " ".join(f"-c {c}" for c in components)
                 rustup_cmd += f" {comp_str}"
 
-            # Run as dev user (su - dev -c "...") so $HOME is /home/dev
-            lines.append(f'RUN su - dev -c "{rustup_cmd}"')
+            # Run as dev user (su - dev -s /bin/bash -c) so $HOME is /home/dev.
+            # Force bash because dev's default shell is fish, which has a
+            # different PATH resolution and breaks npm/cargo/pip lookups.
+            lines.append(f'RUN su - dev -s /bin/bash -c "{rustup_cmd}"')
             lines.append('ENV PATH="/home/dev/.cargo/bin:${PATH}"')
 
             # Add targets (also as dev)
             if targets:
                 for target in targets:
-                    lines.append(f'RUN su - dev -c "/home/dev/.cargo/bin/rustup target add {target}"')
+                    lines.append(f'RUN su - dev -s /bin/bash -c "/home/dev/.cargo/bin/rustup target add {target}"')
             lines.append("")
 
         elif toolchain_name == "elan":
-            # Lean 4 toolchain
+            # Lean 4 toolchain — install as dev user so it goes to /home/dev/.elan
             channel = tc_spec.get("channel", "leanprover/lean4:stable")
-            lines.append(
-                f"RUN curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | "
-                f"sh -s -- -y --default-toolchain {channel}"
+            date = tc_spec.get("date")
+            toolchain_spec = channel if not date else f"{channel}-{date}"
+            elan_cmd = (
+                "curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | "
+                f"sh -s -- -y --default-toolchain {toolchain_spec}"
             )
+            lines.append(f'RUN su - dev -s /bin/bash -c "{elan_cmd}"')
             lines.append('ENV PATH="/home/dev/.elan/bin:${PATH}"')
+            lines.append("")
+
+        elif toolchain_name == "node":
+            # Node.js — installed via pre_install (NodeSource rpm) or direct download.
+            # The toolchain entry just sets the env; the actual install is in pre_install.
+            version = tc_spec.get("version", "20")
+            lines.append(f"# Node.js {version} (installed via pre_install NodeSource repo)")
+            lines.append("")
+
+        elif toolchain_name == "go":
+            # Go — installed via pre_install (direct tarball download).
+            version = tc_spec.get("version", "1.22")
+            lines.append(f"# Go {version} (installed via pre_install tarball download)")
+            lines.append('ENV PATH="/usr/local/go/bin:${PATH}"')
+            lines.append("")
+
+        elif toolchain_name == "python":
+            # Python — installed via dnf packages (python3.12 etc.) in the packages section.
+            version = tc_spec.get("version", "3.12")
+            lines.append(f"# Python {version} (installed via dnf packages above)")
             lines.append("")
 
     # env vars
@@ -181,11 +206,28 @@ def build_containerfile(name: str, spec: dict, parent_ref: str) -> str:
     post = spec.get("post_install", {}).get("commands", [])
     if post:
         if is_root:
-            # Root image: dnf is installed by the package step above, so the
-            # spec's `dnf clean all` works as-is. Just run the commands.
+            # Root image: copy the SDK into the image first, then run post_install.
+            # The SDK file is in the build context (copied by main()).
+            lines.append("COPY stronghold-agent.sh /tmp/stronghold-agent.sh")
             lines.append("RUN " + " && \\\n    ".join(post))
         else:
-            lines.append("RUN " + " && \\\n    ".join(post))
+            # Derived image: run as dev user (su - dev -c) so pip --user
+            # installs to /home/dev/.local, npm -g installs work via sudo, etc.
+            # Strip leading `sudo ` since dev has NOPASSWD sudo.
+            adapted = []
+            for cmd in post:
+                # pip --user installs go to the user's home → run as dev
+                if "--user" in cmd:
+                    cmd_clean = cmd.replace("sudo ", "")
+                    adapted.append(f'su - dev -s /bin/bash -c "{cmd_clean}"')
+                # npm install -g / pnpm install -g need root (writes to /usr/lib/node_modules)
+                # → run as root, strip sudo (we're already root)
+                elif "npm install -g" in cmd or "pnpm install -g" in cmd:
+                    adapted.append(cmd.replace("sudo ", ""))
+                else:
+                    # Run as root (dnf clean all, rm -rf, etc.)
+                    adapted.append(cmd.replace("sudo ", ""))
+            lines.append("RUN " + " && \\\n    ".join(adapted))
         lines.append("")
 
     # inject_containerfile snippets (USER, WORKDIR, VOLUME, CMD)
@@ -247,6 +289,16 @@ def main():
     ctx = Path(f"/tmp/stronghold-{args.name}-build")
     ctx.mkdir(parents=True, exist_ok=True)
     (ctx / "Containerfile").write_text(containerfile)
+
+    # Copy the Stronghold agent SDK into the build context so rocky-base
+    # can install it at /usr/local/bin/stronghold-agent.sh
+    sdk_src = REPO_ROOT / "agent" / "stronghold-agent.sh"
+    if sdk_src.exists():
+        import shutil
+        shutil.copy2(sdk_src, ctx / "stronghold-agent.sh")
+        print(f"📦 copied stronghold-agent.sh into build context", flush=True)
+    else:
+        print(f"⚠️  stronghold-agent.sh not found at {sdk_src}", file=sys.stderr)
 
     # Build with buildah
     local_ref = f"stronghold/{args.name}:{args.tag}"

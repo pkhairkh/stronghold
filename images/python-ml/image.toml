@@ -1,41 +1,39 @@
 # Stronghold Python ML Image
 #
-# Extends rocky-base with Python 3.12, PyTorch, and CUDA toolkit.
+# Extends rocky-base with Python 3 + PyTorch (CPU) + common ML libraries.
+#
+# NOTE: CUDA is dropped from this build — it requires NVIDIA hardware + repos
+# and bloats the image by 5+ GB. For GPU workloads, build a derived
+# `python-ml-cuda` image on a GPU node with the NVIDIA container toolkit.
 
 name = "python-ml"
 extends = "rocky-base"
-description = "Rocky 9 + Python 3.12 + PyTorch + CUDA toolkit"
+description = "Rocky 9 + Python 3 + PyTorch (CPU) + numpy/pandas/sklearn/matplotlib/jupyter"
 
 [packages]
 dnf = [
-    "python3.12",
-    "python3.12-pip",
-    "python3.12-devel",
+    "python3",
+    "python3-pip",
+    "python3-devel",
     "gcc",
     "gcc-c++",
     "make",
     "cmake",
-    "cuda-toolkit",
-    "cudnn",
-    "nccl",
+    "glibc-langpack-en",
 ]
 
-[toolchains.python]
-version = "3.12.2"
-
 [env]
-PYTHONPATH = "{home}/.local/lib/python3.12/site-packages"
-CUDA_HOME = "/usr/local/cuda"
-PATH = "/usr/local/cuda/bin:{path}"
-LD_LIBRARY_PATH = "/usr/local/cuda/lib64"
+PYTHONPATH = "{home}/.local/lib/python3.9/site-packages"
+PIP_NO_CACHE_DIR = "1"
 
 [post_install]
 commands = [
-    "pip3.12 install --user torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121",
-    "pip3.12 install --user numpy pandas scikit-learn matplotlib jupyter",
-    "sudo dnf clean all",
+    "pip3 install --user torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu",
+    "pip3 install --user numpy pandas scikit-learn matplotlib jupyter ipython",
+    "dnf clean all",
+    "rm -rf /var/cache/dnf",
 ]
 
 [labels]
 "org.opencontainers.image.title" = "stronghold/python-ml"
-"org.opencontainers.image.description" = "Python 3.12 + PyTorch + CUDA for ML research"
+"org.opencontainers.image.description" = "Python 3 + PyTorch (CPU) + ML libraries for research"

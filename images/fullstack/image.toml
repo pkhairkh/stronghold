@@ -9,8 +9,9 @@ description = "Rocky 9 + Node 20 + pnpm + Postgres + Redis + Prisma"
 
 [packages]
 dnf = [
-    "postgresql",
-    "redis",
+    "nodejs",           # via NodeSource repo (pre_install)
+    "postgresql",       # psql client
+    "redis",            # redis-cli
     "gcc",
     "gcc-c++",
     "make",
@@ -32,7 +33,7 @@ commands = [
 [post_install]
 commands = [
     "npm install -g pnpm@9 prisma@latest",
-    "sudo dnf clean all",
+    "dnf clean all",
     "rm -rf /var/cache/dnf",
 ]
 
