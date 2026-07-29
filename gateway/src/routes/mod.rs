@@ -10,7 +10,9 @@
 pub mod admin;
 pub mod agent;
 pub mod attestation;
+pub mod credentials;
 pub mod exec;
+pub mod git;
 pub mod instruct;
 pub mod metrics;
 pub mod phone;
@@ -133,6 +135,22 @@ pub fn build_router(
             "/agent/:machine_id/instruct",
             axum::routing::post(instruct::inject),
         )
+        // Credential vault (admin CRUD)
+        .route("/admin/credentials", axum::routing::post(credentials::create_credential))
+        .route("/admin/credentials", axum::routing::get(credentials::list_credentials))
+        .route("/admin/credentials/:id", axum::routing::get(credentials::get_credential))
+        .route("/admin/credentials/:id", axum::routing::delete(credentials::delete_credential))
+        .route("/admin/credentials/:id/rotate", axum::routing::post(credentials::rotate_credential))
+        // Credential vault (agent access)
+        .route(
+            "/agent/:machine_id/credentials/:name",
+            axum::routing::get(credentials::agent_get_credential),
+        )
+        // Git flow
+        .route("/agent/:machine_id/git/clone", axum::routing::post(git::clone_repo))
+        .route("/agent/:machine_id/git/branch", axum::routing::post(git::create_branch))
+        .route("/agent/:machine_id/git/commit", axum::routing::post(git::commit))
+        .route("/agent/:machine_id/git/push", axum::routing::post(git::push))
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))
