@@ -1,5 +1,13 @@
 # SEV-SNP Attestation Guide
 
+> ⚠️ **Alpha status note.** The SEV-SNP code in `gateway/src/tee/` is
+> implemented and unit-tested on the dev box (which lacks `/dev/sev-guest`,
+> so the dev-fallback path is exercised). The full attestation flow has
+> **never been tested on real SEV-SNP hardware** — see gap #18. Treat the
+> SEV-SNP protection as unverified until golden integration tests run on
+> a real SEV-SNP box. Also note the `--dev` flag bug (gap #17) described in
+> [Development Without SEV-SNP](#development-without-sev-snp).
+
 ## Overview
 
 Stronghold's gateway runs inside an AMD SEV-SNP (Secure Encrypted Virtualization - Secure Nested Paging) confidential VM. This provides:
@@ -11,7 +19,7 @@ Stronghold's gateway runs inside an AMD SEV-SNP (Secure Encrypted Virtualization
 
 ---
 
-## Implementation Status (Wave 7 / v1.0)
+## Implementation Status (Wave 7 / 0.9.0-alpha)
 
 | Component | Status | Notes |
 |---|---|---|
@@ -231,11 +239,14 @@ If the keys are lost (e.g., the box is destroyed without backup):
 
 ```bash
 # Fetch the attestation report
-curl https://gateway:8443/attestation | jq
+# NOTE: use http://, not https:// — TLS is not wired into server startup (gap #1)
+curl http://gateway:8443/attestation | jq
 
 # Compare the measurement with the published value
-curl https://gateway:8443/attestation | jq -r .measurement
+curl http://gateway:8443/attestation | jq -r .measurement
 # Should match: docs/MEASUREMENTS/v1.0.txt
+# WARNING: docs/MEASUREMENTS/v1.0.txt is currently an all-zero placeholder.
+# SEV-SNP has never been tested on real hardware (gap #18).
 ```
 
 ### Verify the audit log includes SEV-SNP reports
@@ -244,13 +255,19 @@ curl https://gateway:8443/attestation | jq -r .measurement
 stronghold audit verify --tenant <id>
 ```
 
-This checks:
+This checks (target behavior — see notes below):
 
-1. Hash chain is unbroken
-2. Every Ed25519 signature verifies
-3. Every ML-DSA-65 signature verifies (deferred to v1.1 — see `docs/CRYPTO.md`)
-4. SEV-SNP attestation report hashes are present (when gateway was in TEE mode)
-5. Attestation report hashes match the gateway's current measurement
+1. Hash chain is unbroken ✅ (implemented)
+2. Every Ed25519 signature verifies ❌ **TODO** (gap #16)
+3. Every ML-DSA-65 signature verifies ❌ **TODO** (gap #16)
+4. SEV-SNP attestation report hashes are present (when gateway was in TEE mode) ❌ **TODO**
+5. Attestation report hashes match the gateway's current measurement ❌ **TODO**
+
+> ⚠️ **Alpha status.** As of `0.9.0-alpha`, `stronghold audit verify` only
+> performs step 1 (hash chain check). Steps 2–5 are TODO. The audit log
+> **writer** does include SEV-SNP report hashes and dual Ed25519 + ML-DSA-65
+> signatures in every entry — the gap is purely in the verifier. See
+> [CRYPTO.md](CRYPTO.md#audit-signatures-ed25519--ml-dsa-65) and gap #16.
 
 ---
 
@@ -278,6 +295,38 @@ cargo build --release --no-default-features --features no-sev-snp
 # because /dev/sev-guest is absent)
 cargo build --release --features no-sev-snp
 ```
+
+### ⚠️ The `--dev` flag bug (gap #17)
+
+The `stronghold-gateway serve --dev` CLI flag is intended to bypass the
+SEV-SNP availability check at startup. However, **as of `0.9.0-alpha` it
+is buggy**: the flag sets a struct field on the parsed CLI args, but
+`main.rs::serve()` reads the `STRONGHOLD_DEV` **environment variable**
+instead:
+
+```rust,ignore
+// main.rs::serve() — the only check that actually gates SEV-SNP at startup:
+if !std::env::var("STRONGHOLD_DEV").is_ok() {
+    tee::verify_sev_snp_available()?;
+}
+```
+
+The struct field set by `--dev` is never consulted. As a result, running
+`stronghold-gateway serve --dev` on a box without `/dev/sev-guest` will
+**still fail** at startup with `verify_sev_snp_available()` returning an
+error.
+
+**Workaround:** set the env var explicitly:
+
+```bash
+STRONGHOLD_DEV=1 stronghold-gateway serve
+# or:
+export STRONGHOLD_DEV=1
+stronghold-gateway serve
+```
+
+This will be fixed when either (a) `serve()` is changed to read the struct
+field, or (b) the CLI flag also sets the env var. See gap #17.
 
 When running without SEV-SNP:
 

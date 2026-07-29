@@ -1,5 +1,11 @@
 # Stronghold Image DSL
 
+> ⚠️ **Alpha status note.** The DSL parser and Containerfile generator are
+> fully implemented and tested. However, the `image build` subcommand only
+> **generates** the Containerfile — it does not invoke `podman`/`docker`
+> (gap #11). `image push` and `image pull` are stubs (gap #12). See
+> [Building](#building) below for details.
+
 ## Overview
 
 The Image DSL is a TOML-based format for defining OCI images. All images `extends` from `stronghold/rocky-base` — the universal root. The DSL generates Containerfiles at build time.
@@ -220,15 +226,34 @@ snippets = [
 
 ## Building
 
-```bash
-# Build an image from image.toml
-stronghold image build images/rust-nightly/image.toml --tag stronghold/rust-nightly:2026.07
+> ⚠️ **Alpha status.** `image build` only **generates** the Containerfile
+> from `image.toml` — it does NOT invoke `podman`, `docker`, or any other
+> build tool. The actual image build is a TODO (see gap #11). `image push`
+> and `image pull` are also stubs (gap #12) and do not contact any registry.
+> The DSL parser and Containerfile generator are fully implemented and tested.
 
-# List available images
+```bash
+# "Build" an image from image.toml — generates Containerfile only (gap #11)
+stronghold image build images/rust-nightly/image.toml --tag stronghold/rust-nightly:2026.07
+# → writes ./Containerfile (or equivalent path); does NOT invoke podman/docker
+
+# List available images in the catalog (parses images/*/image.toml)
 stronghold image list
 
-# Push to registry
+# Push to registry — NOT YET IMPLEMENTED (gap #12), no-op stub
 stronghold image push stronghold/rust-nightly:2026.07
+
+# Pull from registry — NOT YET IMPLEMENTED (gap #12), no-op stub
+stronghold image pull stronghold/rust-nightly:2026.07
+```
+
+To actually build the generated Containerfile in the alpha release, invoke
+`podman` or `docker` manually:
+
+```bash
+stronghold image build images/rust-nightly/image.toml --tag stronghold/rust-nightly:2026.07
+# then:
+podman build -t stronghold/rust-nightly:2026.07 -f Containerfile .
 ```
 
 ---

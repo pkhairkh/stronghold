@@ -1,8 +1,28 @@
 # Stronghold Deployment Guide
 
-This runbook covers three deployment patterns, from simplest to most complex.
-Each pattern has step-by-step instructions, troubleshooting, and rollback
-procedures. All scripts are idempotent — safe to re-run.
+> ⚠️ **Alpha release — DO NOT DEPLOY IN PRODUCTION.**
+>
+> This runbook covers three deployment patterns, from simplest to most
+> complex. Each pattern has step-by-step instructions, troubleshooting, and
+> rollback procedures. All scripts are idempotent — safe to re-run.
+>
+> **Known gaps affecting this runbook:**
+>
+> - The gateway serves **plain HTTP on port 8443** (TLS is not wired into
+>   server startup — see gap #1). Use `http://`, not `https://`, against the
+>   gateway. Compensate with a transport-level VPN (Tailscale/WireGuard) in
+>   any deployment that crosses an untrusted network.
+> - **Prometheus metrics are NOT exposed** (gap #13). There is no `/metrics`
+>   route.
+> - **Per-tenant Kubernetes namespaces and NetworkPolicy objects are NOT
+>   created** (gaps #14, #15). All pods land in `default`; `tenant_id` is
+>   only a label. See [Roadmap](#roadmap).
+> - **VPS escalation is a stub** (gap #9). Dedicated/GPU requests return
+>   `"stub-vps-id"` / `"0.0.0.0"`.
+> - **`worker add` and `worker list` are stubs** (gap #10).
+>
+> See [README → Known Limitations](../README.md#known-limitations) for the
+> full list of alpha gaps.
 
 ## Deployment Patterns
 
@@ -64,7 +84,8 @@ systemctl status ntfy
 ss -tlnp | grep -E '8443|8090'
 
 # 8. Smoke-test the gateway
-curl -k https://localhost:8443/agent/health
+#    NOTE: TLS is not enabled (gap #1). Use http://, not https://.
+curl http://localhost:8443/agent/health
 curl    http://localhost:8090/v1/health
 
 # 9. Save the setup password printed by bootstrap.sh
@@ -127,8 +148,8 @@ stronghold agent-token mint --tenant default --ttl 86400
 | `/dev/sev not found` | Vultr plan doesn't have SEV-SNP | Use `--dev` for dev, or reprovision with SEV-SNP plan |
 | `stronghold-gateway: failed` in systemd | Keys not initialized | `stronghold-gateway init --data-dir /var/lib/stronghold` |
 | Port 8443 not reachable | Firewall blocking | `bash setup/firewall.sh`; check `firewall-cmd --list-all` |
-| `curl https://localhost:8443` times out | Gateway bound to wrong address | Check `Environment=STRONGHOLD_BIND` in systemd unit |
-| Phone can't reach gateway | TLS cert issue (self-signed) | Install the cert at `/etc/stronghold/tls.crt` on the phone, or use Tailscale for trust |
+| `curl https://localhost:8443` times out | Gateway bound to wrong address | Use `curl http://localhost:8443` (TLS not enabled — gap #1). Also check `Environment=STRONGHOLD_BIND` in systemd unit |
+| Phone can't reach gateway | TLS cert issue (self-signed) | TLS is not enabled in alpha — use `http://`, or front the gateway with a Tailscale/WireGuard tunnel. Cert generation exists but is not wired into startup (gap #1) |
 
 ### Rollback
 
@@ -241,11 +262,17 @@ stronghold worker list
 
 ### VPS Escalation
 
-For workloads needing more than any worker has (GPU, large memory):
+> ❌ **Stub — not yet implemented.** The gateway's VPS-escalation path returns
+> `"stub-vps-id"` and `"0.0.0.0"` without calling the Vultr API. Dedicated /
+> GPU orders will currently fail at the scheduling step. See gap #9.
+
+For workloads needing more than any worker has (GPU, large memory), the
+**planned** flow is:
 
 ```bash
 # Agent requests dedicated VPS via gateway API
-curl -X POST https://gateway:8443/agent/order \
+# NOTE: as of alpha this returns a stub — see gap #9
+curl -X POST http://gateway:8443/agent/order \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -d '{
     "image": "stronghold/python-ml:2026.07",
@@ -253,12 +280,14 @@ curl -X POST https://gateway:8443/agent/order \
   }'
 ```
 
-The gateway:
+The gateway is intended to:
 
-1. Calls Vultr API to boot a fresh Rocky VPS with GPU
+1. Call Vultr API to boot a fresh Rocky VPS with GPU
 2. Cloud-init installs k3s worker, joins cluster (via Tailscale)
 3. Pod is scheduled on the new VPS
 4. On session end, VPS is destroyed, volumes snapshotted
+
+None of these steps are implemented in the alpha release.
 
 ### Troubleshooting (multi-box)
 
@@ -333,15 +362,15 @@ echo 'AWS_SECRET_ACCESS_KEY=...'  >> /etc/stronghold/backup.env
 
 ### Multi-Tenant Isolation
 
-| Layer | Isolation mechanism |
-|-------|---------------------|
-| Database | Separate `tenant_id` column on every row; row-level checks in code |
-| Audit log | Per-tenant hash chains; signatures verify per tenant |
-| Push notifications | Per-tenant ntfy topics with ACLs (see `setup/ntfy.yml`) |
-| Pods | Kubernetes namespaces per tenant; network policies deny cross-tenant traffic |
-| Filesystem | Per-tenant volume mounts; no shared dirs |
-| Process | Separate PID namespace per pod |
-| Network | Per-tenant egress allowlists enforced by gateway |
+| Layer | Isolation mechanism | Status (alpha) |
+|-------|---------------------|----------------|
+| Database | Separate `tenant_id` column on every row; row-level checks in code | ✅ Implemented |
+| Audit log | Per-tenant hash chains; signatures verify per tenant | ✅ Writer implemented; ⚠️ `audit verify` only checks hash chain (gap #16) |
+| Push notifications | Per-tenant ntfy topics with ACLs (see `setup/ntfy.yml`) | ✅ ntfy ACLs; ⚠️ payloads are plaintext (gap #4) |
+| Pods | Kubernetes namespaces per tenant; network policies deny cross-tenant traffic | ❌ **Not yet implemented** (gaps #14, #15). All pods land in `default`; `tenant_id` is only a label. See [Roadmap](#roadmap). |
+| Filesystem | Per-tenant volume mounts; no shared dirs | ✅ Implemented |
+| Process | Separate PID namespace per pod | ✅ Implemented (k8s default) |
+| Network | Per-tenant egress allowlists enforced by gateway | ❌ **Not yet implemented** (gap #15). No NetworkPolicy objects are created. |
 
 ### Billing (if you choose to monetize)
 
@@ -433,8 +462,8 @@ bash setup/monitoring.sh --all
 ### Health Checks
 
 ```bash
-# Gateway health
-curl -k https://gateway:8443/agent/health
+# Gateway health (http://, not https:// — TLS not enabled, gap #1)
+curl http://gateway:8443/agent/health
 
 # ntfy health
 curl http://gateway:8090/v1/health
@@ -443,7 +472,9 @@ curl http://gateway:8090/v1/health
 kubectl get nodes
 
 # Worker health
-stronghold worker health-check --host vultr-worker-1
+# NOTE: `worker health-check` is a stub (gap #10). Use kubectl instead.
+# stronghold worker health-check --host vultr-worker-1
+kubectl describe node vultr-worker-1
 
 # Monitoring status
 bash setup/monitoring.sh --status
@@ -465,7 +496,13 @@ journalctl -u k3s-agent -f    # agent (worker)
 
 ### Metrics
 
-The gateway exposes Prometheus metrics at `https://<host>:8443/metrics`:
+> ❌ **Not yet implemented.** There is no `/metrics` route on the gateway
+> (gap #13). The Prometheus scrape target below will return 404 until the
+> metrics route is added. The Grafana dashboard JSON shipped in
+> `setup/monitoring/` is preserved for when this is implemented.
+
+**Target state (planned):** the gateway exposes Prometheus metrics at
+`http://<host>:8443/metrics` (HTTP, not HTTPS — see gap #1):
 
 - `stronghold_sessions_active` — current active agent sessions
 - `stronghold_approvals_pending` — pending phone approvals
@@ -473,7 +510,7 @@ The gateway exposes Prometheus metrics at `https://<host>:8443/metrics`:
 - `stronghold_sqlite_db_size_bytes` — SQLite DB file size
 - Standard `process_*` and `http_*` Prometheus metrics
 
-Import the pre-built dashboard:
+Import the pre-built dashboard (once `/metrics` exists):
 
 ```bash
 # In Grafana: Dashboards → Import → Upload JSON file
@@ -508,10 +545,10 @@ bash setup/backup.sh --restore /var/lib/stronghold/backups/stronghold-host-20260
 ### What's backed up
 
 - SQLite DB (online snapshot via `.backup` — does not block writers)
-- Audit keys (Ed25519 + ML-DSA-65 stubs)
+- Audit keys (Ed25519 + ML-DSA-65)
 - Push keys (X25519 + ML-KEM-768)
 - Audit log files
-- Config dir (TLS cert, ntfy config, server.yml)
+- Config dir (TLS cert, ntfy config, server.yml) — *Note: TLS cert is not loaded by `serve()` in alpha (gap #1); files are backed up regardless.*
 - Manifest with version metadata
 
 ### Automated backups
@@ -662,3 +699,35 @@ systemd-analyze security ntfy.service
 | `setup/systemd/stronghold-gateway.service` | Gateway systemd unit (hardened, /dev/sev allowed) |
 | `setup/systemd/ntfy.service` | ntfy systemd unit (fully hardened) |
 | `setup/systemd/k3s-worker.service` | k3s agent systemd unit (relaxed hardening for container mgmt) |
+
+---
+
+## Roadmap
+
+The following deployment-pattern features are **planned but not yet implemented**
+as of `0.9.0-alpha`. They were previously described in this document as if
+already shipping; they have been moved here for accuracy.
+
+- **TLS termination in `serve()`.** Wire the existing `crypto/tls.rs` config
+  into the axum server. The self-signed cert generator (`rcgen`) already
+  exists; it just is not loaded on startup. See gap #1.
+- **Per-tenant Kubernetes namespaces.** Currently all pods land in `default`;
+  `tenant_id` is only a label. Planned: one namespace per tenant, enforced at
+  the namespace boundary. See gap #14.
+- **Per-tenant NetworkPolicy objects.** No `NetworkPolicy` objects are
+  created today. Planned: default-deny egress per tenant with an allowlist
+  (github.com, crates.io, etc.). See gap #15.
+- **Prometheus `/metrics` route.** No `/metrics` route exists today. Planned:
+  expose `stronghold_sessions_active`, `stronghold_approvals_pending`,
+  `stronghold_audit_entries_total`, `stronghold_sqlite_db_size_bytes`. See
+  gap #13.
+- **VPS escalation via Vultr API.** Replace the stub with real cloud-init +
+  k3s-agent join. See gap #9.
+- **`worker add` / `worker list`.** Implement real SSH/cloud-init provisioning
+  and a real worker registry. See gap #10.
+- **SEV-SNP golden integration tests on real hardware.** Blocked on
+  provisioning a Vultr SEV-SNP box. See gap #18.
+
+See [CHANGELOG.md → Known Open Gaps](../CHANGELOG.md#known-open-gaps-alpha-scope--advertised-but-not-enforced-in-the-running-gateway)
+for the full alpha-gap list.
+
