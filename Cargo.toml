@@ -99,9 +99,6 @@ aho-corasick = "1.1"
 
 # SEV-SNP (behind feature flag)
 sev = "4.0"
-# bincode is used by the sev-snp feature path to serialize the
-# `sev::firmware::guest::AttestationReport` (`#[repr(C)]` struct) into a
-# byte blob for base64-encoding in the /attestation endpoint.
 bincode = "1.3"
 
 # Container registry client
