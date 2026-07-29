@@ -156,16 +156,40 @@ pub async fn inject(
             }))
         }
         "control" => {
-            // Control WebSocket channel is implemented in N4
-            // For now, log a warning and return accepted
-            tracing::warn!(
-                "Control channel mode not yet implemented (N4) — instruction accepted but not delivered via control WS"
-            );
-            Ok(Json(InstructResponse {
-                status: "accepted".to_string(),
-                mode: "control".to_string(),
-                message: "Control channel delivery pending (N4)".to_string(),
-            }))
+            // Send the instruction via the control channel (same pty_registry,
+            // but with a JSON envelope instead of raw text).
+            let registry = state.pty_registry.read().await;
+            if let Some(sender) = registry.get(&machine_id) {
+                let control_msg = serde_json::json!({
+                    "type": "instruct",
+                    "instruction": req.instruction,
+                    "context": req.context,
+                    "priority": req.priority,
+                });
+                let msg_str = format!(
+                    "\x1b]51;stronghold:control\x07{}\x1b]51;stronghold:control\x07",
+                    control_msg
+                );
+                sender
+                    .send(msg_str.into_bytes())
+                    .await
+                    .map_err(|_| {
+                        (
+                            StatusCode::GONE,
+                            "PTY session no longer active".to_string(),
+                        )
+                    })?;
+                Ok(Json(InstructResponse {
+                    status: "delivered".to_string(),
+                    mode: "control".to_string(),
+                    message: "Control message sent via PTY channel".to_string(),
+                }))
+            } else {
+                Err((
+                    StatusCode::NOT_FOUND,
+                    "No active PTY session for this machine_id".to_string(),
+                ))
+            }
         }
         _ => Err((
             StatusCode::BAD_REQUEST,
