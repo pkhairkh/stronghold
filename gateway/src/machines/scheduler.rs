@@ -158,9 +158,7 @@ pub async fn open_pty(machine_id: &str) -> Result<PtyHandle> {
     let client = get_kube_client().await?;
     let pods: Api<Pod> = Api::default_namespaced(client);
 
-    // Open an exec session: `sh -c "exec sh"` (try bash first, fall back to sh).
-    let command = vec!["sh".to_string(), "-c".to_string(), "exec sh".to_string()];
-
+    // Open an exec session: `sh` for interactive shell.
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(32);
 
@@ -174,12 +172,10 @@ pub async fn open_pty(machine_id: &str) -> Result<PtyHandle> {
             .stdin(true)
             .stdout(true)
             .stderr(true)
-            .tty(true)
-            .command(command);
+            .tty(true);
 
         match pods.exec(&machine_id_owned, vec!["sh"], &ap).await {
             Ok(mut exec) => {
-                use kube::Api::ExecStreamExt as _;
                 use tokio::io::AsyncWriteExt;
 
                 // Get stdin writer
