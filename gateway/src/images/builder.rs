@@ -165,26 +165,91 @@ pub fn generate_containerfile(config: &ImageConfig) -> Result<String> {
 }
 
 /// Build an OCI image from an image.toml config.
+///
+/// Writes the generated Containerfile to a temp dir, then invokes
+/// `podman build -t <tag> -f <Containerfile> .` with the temp dir as the
+/// build context. On success, `podman inspect --format '{{.Digest}}' <tag>`
+/// is used to read back the image's real digest, which is returned as
+/// `sha256:...`.
+///
+/// If podman is not installed, returns a helpful error pointing at the
+/// install command.
 pub async fn build(config: &ImageConfig, tag: &str) -> Result<String> {
     let containerfile = generate_containerfile(config)?;
 
     tracing::info!(
         image = %config.name,
         tag = %tag,
-        "Building OCI image (stub)"
+        "Building OCI image via podman"
     );
 
-    // Write Containerfile to temp dir
+    // Write Containerfile to temp dir. The temp dir doubles as the podman
+    // build context (the "." passed to `podman build`).
     let temp_dir = std::env::temp_dir().join(format!("stronghold-build-{}", ulid::Ulid::new()));
     std::fs::create_dir_all(&temp_dir)?;
-    std::fs::write(temp_dir.join("Containerfile"), &containerfile)?;
+    let containerfile_path = temp_dir.join("Containerfile");
+    std::fs::write(&containerfile_path, &containerfile)?;
 
-    // TODO: call podman or docker build
-    // For now, just log the generated Containerfile
     tracing::debug!("Generated Containerfile:\n{}", containerfile);
 
-    // Return the image digest (stub)
-    let digest = format!("sha256:{}", hex::encode([0u8; 32]));
+    let containerfile_str = containerfile_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("Containerfile path is not valid UTF-8: {:?}", containerfile_path)
+    })?;
+
+    // --- podman build ---------------------------------------------------
+    // If `podman` is not on PATH, `Command::output()` returns Err. We map
+    // that to a friendly, actionable error so callers know how to recover.
+    let build_output = std::process::Command::new("podman")
+        .args(["build", "-t", tag, "-f", containerfile_str, "."])
+        .current_dir(&temp_dir)
+        .output()
+        .map_err(|_| {
+            anyhow::anyhow!("podman not installed — install with: dnf install podman")
+        })?;
+
+    if !build_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "podman build failed (exit {:?}): {}",
+            build_output.status.code(),
+            String::from_utf8_lossy(&build_output.stderr).trim()
+        ));
+    }
+
+    // --- podman inspect -------------------------------------------------
+    // `podman inspect --format '{{.Digest}}' <tag>` prints the image's
+    // sha256 digest on stdout (already in `sha256:...` form).
+    let inspect_output = std::process::Command::new("podman")
+        .args(["inspect", "--format", "{{.Digest}}", tag])
+        .output()
+        .map_err(|_| {
+            anyhow::anyhow!("podman not installed — install with: dnf install podman")
+        })?;
+
+    if !inspect_output.status.success() {
+        return Err(anyhow::anyhow!(
+            "podman inspect failed (exit {:?}): {}",
+            inspect_output.status.code(),
+            String::from_utf8_lossy(&inspect_output.stderr).trim()
+        ));
+    }
+
+    let digest = String::from_utf8_lossy(&inspect_output.stdout).trim().to_string();
+
+    // Guard against a bare hex digest (no `sha256:` prefix); podman normally
+    // includes the prefix, but we normalize just in case.
+    let digest = if digest.starts_with("sha256:") {
+        digest
+    } else {
+        format!("sha256:{}", digest)
+    };
+
+    tracing::info!(
+        image = %config.name,
+        tag = %tag,
+        digest = %digest,
+        "Image built"
+    );
+
     Ok(digest)
 }
 
@@ -895,21 +960,45 @@ NUMBER = "42"
     }
 
     // ----------------------------------------------------------------------
-    // W6-T3 (smoke): build() stub writes Containerfile to temp dir and
-    // returns a sha256: digest. (Podman integration deferred.)
+    // B7: build() now invokes `podman build` + `podman inspect`. In
+    // environments without podman on PATH (e.g. CI), build() must return a
+    // helpful "podman not installed" error. When podman IS available, the
+    // real build path is exercised manually / in integration tests — the
+    // unit test below skips in that case to avoid network + base-image
+    // dependencies.
     // ----------------------------------------------------------------------
 
+    /// True if `podman --version` exits successfully.
+    fn podman_on_path() -> bool {
+        std::process::Command::new("podman")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
-    async fn test_build_stub_writes_containerfile_and_returns_digest() {
+    async fn test_build_returns_error_when_podman_missing() {
+        // If podman is installed, the real-build path needs network + base
+        // images; that's covered by integration tests, not this unit test.
+        if podman_on_path() {
+            eprintln!("podman found on PATH — skipping podman-missing error test");
+            return;
+        }
+
         let cfg = load_catalog("rust-stable");
-        let digest = build(&cfg, "stronghold/rust-stable:test")
+        let err = build(&cfg, "stronghold/rust-stable:test")
             .await
-            .expect("build (stub) should succeed");
-        // Stub digest format: sha256: + 64 hex chars (32 zero bytes)
-        assert!(digest.starts_with("sha256:"));
-        assert_eq!(digest.len(), "sha256:".len() + 64);
-        // The hex portion should be all zeros (stub)
-        let hex_part = &digest["sha256:".len()..];
-        assert!(hex_part.chars().all(|c| c == '0'));
+            .expect_err("build should fail when podman is not installed");
+        assert!(
+            err.to_string().contains("podman not installed"),
+            "expected 'podman not installed' error, got: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("dnf install podman"),
+            "expected install hint in error, got: {}",
+            err
+        );
     }
 }
