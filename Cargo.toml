@@ -64,6 +64,7 @@ kem = "=0.3.0-pre.0"
 
 # X.509 certificate generation (for self-signed TLS certs)
 rcgen = "0.14"
+time = "0.3"
 
 # HTTP client (for ntfy, Vultr API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

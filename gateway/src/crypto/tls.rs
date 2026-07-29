@@ -38,15 +38,87 @@ pub fn build_server_config(
     Ok(config)
 }
 
+/// Generate a self-signed ECDSA P-256 certificate and private key.
+///
+/// Returns `(cert_pem, key_pem)` suitable for writing to files and loading
+/// via `build_server_config_from_files()`.
+///
+/// The certificate is self-signed with a 10-year validity period and includes
+/// the Common Name and Subject Alternative Name (DNS name) specified.
+/// For production, use a real CA-signed certificate.
+pub fn generate_self_signed_cert(cn: &str) -> Result<(String, String)> {
+    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
+
+    let mut params = CertificateParams::new(vec![cn.to_string()]);
+    params.distinguished_name = DistinguishedName::new();
+    params.distinguished_name.push(DnType::CommonName, cn);
+
+    // 10-year validity.
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now;
+    params.not_after = now + time::Duration::days(3650);
+
+    let key_pair = KeyPair::generate()
+        .map_err(|e| anyhow::anyhow!("key pair generation failed: {}", e))?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| anyhow::anyhow!("certificate generation failed: {}", e))?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    Ok((cert_pem, key_pem))
+}
+
 /// Build a TLS server config with a self-signed certificate (for development).
 ///
-/// TODO W10-T: implement using rcgen or aws_lc_rs cert builder. For now,
-/// use `build_server_config_from_files()` with externally-generated certs.
-#[cfg(test)]
+/// Generates an ephemeral self-signed cert and returns the config + cert DER
+/// (for client pinning). The cert is NOT trusted by default.
 pub fn build_self_signed_server_config() -> Result<(ServerConfig, Vec<u8>)> {
-    Err(anyhow::anyhow!(
-        "self-signed cert generation not yet implemented — use build_server_config_from_files()"
-    ))
+    let (cert_pem, key_pem) = generate_self_signed_cert("localhost")?;
+
+    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parsing self-signed cert PEM")?;
+
+    if cert_chain.is_empty() {
+        return Err(anyhow::anyhow!("no certificates in self-signed PEM"));
+    }
+
+    let key_der = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .context("parsing self-signed key PEM")?
+        .ok_or_else(|| anyhow::anyhow!("no private key in self-signed PEM"))?;
+
+    let config = build_server_config(cert_chain.clone(), key_der)?;
+
+    // Return the first cert's DER for client pinning.
+    let cert_der = cert_chain[0].to_vec();
+    Ok((config, cert_der))
+}
+
+/// Generate a self-signed cert and key, write them to files.
+///
+/// Writes `<keys_dir>/tls.crt` and `<keys_dir>/tls.key` with appropriate
+/// permissions (0644 for cert, 0600 for key).
+pub fn generate_self_signed_cert_files(keys_dir: &str, cn: &str) -> Result<()> {
+    let (cert_pem, key_pem) = generate_self_signed_cert(cn)?;
+
+    let cert_path = format!("{}/tls.crt", keys_dir);
+    let key_path = format!("{}/tls.key", keys_dir);
+
+    std::fs::create_dir_all(keys_dir)?;
+    std::fs::write(&cert_path, cert_pem)?;
+    std::fs::write(&key_path, key_pem)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o644))?;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    tracing::info!(cn = cn, cert = %cert_path, "Self-signed TLS certificate generated");
+    Ok(())
 }
 
 /// Build a TLS server config from PEM-encoded cert and key files.
@@ -147,5 +219,51 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("tls.crt") || err.contains("reading"));
+    }
+
+    #[test]
+    fn test_generate_self_signed_cert() {
+        let (cert_pem, key_pem) = generate_self_signed_cert("localhost").unwrap();
+        assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn test_build_self_signed_server_config() {
+        let (config, cert_der) = build_self_signed_server_config().unwrap();
+        // Config should be usable (not a panic).
+        let _ = config;
+        // Cert DER should be non-empty.
+        assert!(!cert_der.is_empty());
+    }
+
+    #[test]
+    fn test_generate_self_signed_cert_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        generate_self_signed_cert_files(dir, "localhost").unwrap();
+
+        assert!(std::path::Path::new(&format!("{}/tls.crt", dir)).exists());
+        assert!(std::path::Path::new(&format!("{}/tls.key", dir)).exists());
+
+        // Verify the cert + key can be loaded into a server config.
+        let config = build_server_config_from_files(dir);
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_self_signed_cert_has_correct_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        generate_self_signed_cert_files(dir, "localhost").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let cert_meta = std::fs::metadata(format!("{}/tls.crt", dir)).unwrap();
+            assert_eq!(cert_meta.permissions().mode() & 0o777, 0o644);
+            let key_meta = std::fs::metadata(format!("{}/tls.key", dir)).unwrap();
+            assert_eq!(key_meta.permissions().mode() & 0o777, 0o600);
+        }
     }
 }
