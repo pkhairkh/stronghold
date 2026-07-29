@@ -176,6 +176,13 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
         }
     };
 
+    // Register a channel so the mid-session reprompt endpoint can inject text.
+    let (instruct_tx, mut instruct_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    {
+        let mut registry = state.pty_registry.write().await;
+        registry.insert(machine_id.clone(), instruct_tx);
+    }
+
     // Anomaly scanner — loaded once with default patterns (curl/wget/scp,
     // rm -rf, sudo, ssh). Each chunk of PTY output is scanned below.
     let scanner = AnomalyScanner::defaults();
@@ -376,7 +383,23 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
                     }
                 }
             }
+            // Mid-session reprompt injection
+            msg = instruct_rx.recv() => {
+                if let Some(data) = msg {
+                    if let Err(e) = pty.write_all(&data).await {
+                        tracing::error!(error = %e, "Failed to inject reprompt into PTY");
+                        break;
+                    }
+                    tracing::info!(machine = %machine_id, "Reprompt injected into PTY ({} bytes)", data.len());
+                }
+            }
         }
+    }
+
+    // Unregister from the PTY registry
+    {
+        let mut registry = state.pty_registry.write().await;
+        registry.remove(&machine_id);
     }
 
     tracing::info!(machine = %machine_id, "PTY WebSocket closed");

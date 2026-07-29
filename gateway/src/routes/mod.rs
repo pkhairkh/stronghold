@@ -11,6 +11,7 @@ pub mod admin;
 pub mod agent;
 pub mod attestation;
 pub mod exec;
+pub mod instruct;
 pub mod metrics;
 pub mod phone;
 pub mod pty;
@@ -43,6 +44,9 @@ pub struct AppState {
     pub db: Pool<SqliteConnectionManager>,
     pub audit_keys: AuditKeys,
     pub push_keys: PushKeys,
+    /// Registry of active PTY sessions: machine_id → stdin sender.
+    /// Used by the mid-session reprompt endpoint to inject text into running sessions.
+    pub pty_registry: Arc<tokio::sync::RwLock<std::collections::HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 /// Concurrency-limiting middleware.
@@ -85,6 +89,7 @@ pub fn build_router(
         db: db_pool,
         audit_keys,
         push_keys,
+        pty_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Global concurrency limiter — shared across all routes.
@@ -117,6 +122,16 @@ pub fn build_router(
         .route(
             "/agent/task/:id/result",
             axum::routing::post(tasks::submit_result),
+        )
+        // Task SSE stream
+        .route(
+            "/agent/task/:id/stream",
+            axum::routing::get(tasks::stream_task),
+        )
+        // Mid-session reprompt
+        .route(
+            "/agent/:machine_id/instruct",
+            axum::routing::post(instruct::inject),
         )
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
