@@ -201,6 +201,10 @@ pub struct BranchRequest {
     /// Starting point for the new branch. If `None`, the current `HEAD` is
     /// used (i.e. `git checkout -b <name>`).
     pub from: Option<String>,
+    /// Path to the git repo inside the pod. If `None`, the pod's WORKDIR
+    /// is used (which may not be a git repo — always pass the clone path).
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Response body for `POST /agent/:machine_id/git/branch`.
@@ -225,8 +229,14 @@ pub async fn create_branch(
 ) -> Result<Json<BranchResponse>, (StatusCode, String)> {
     let tenant_id = verify_connect_token(&state, &machine_id, &query).await?;
 
-    // Build: git checkout -b '<name>' ['<from>']
-    let mut script = String::from("git checkout -b ");
+    // Build: [cd '<path>' &&] git checkout -b '<name>' ['<from>']
+    let mut script = String::new();
+    if let Some(p) = &req.path {
+        script.push_str("cd ");
+        script.push_str(&shell_quote(p));
+        script.push_str(" && ");
+    }
+    script.push_str("git checkout -b ");
     script.push_str(&shell_quote(&req.name));
     if let Some(from) = &req.from {
         script.push(' ');
@@ -277,6 +287,9 @@ pub struct CommitRequest {
     /// Specific files to stage. If `None` or empty, `git add -A` stages all
     /// changes in the working tree.
     pub files: Option<Vec<String>>,
+    /// Path to the git repo inside the pod.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Response body for `POST /agent/:machine_id/git/commit`.
@@ -306,9 +319,14 @@ pub async fn commit(
 ) -> Result<Json<CommitResponse>, (StatusCode, String)> {
     let tenant_id = verify_connect_token(&state, &machine_id, &query).await?;
 
-    // Build the combined script: stage && commit.
-    // `git add '<f1>' '<f2>' ...` or `git add -A`.
-    let mut script = String::from("git add ");
+    // Build the combined script: [cd '<path>' &&] stage && commit.
+    let mut script = String::new();
+    if let Some(p) = &req.path {
+        script.push_str("cd ");
+        script.push_str(&shell_quote(p));
+        script.push_str(" && ");
+    }
+    script.push_str("git add ");
     let files_specified = req
         .files
         .as_ref()
@@ -383,6 +401,9 @@ pub struct PushRequest {
     /// Branch to push. If `None`, git pushes the current branch
     /// (`git push <remote> HEAD`).
     pub branch: Option<String>,
+    /// Path to the git repo inside the pod.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Response body for `POST /agent/:machine_id/git/push`.
@@ -411,7 +432,13 @@ pub async fn push(
     let remote = req.remote.as_deref().unwrap_or("origin");
     let branch = req.branch.as_deref().unwrap_or("HEAD");
 
-    let mut script = String::from("git push ");
+    let mut script = String::new();
+    if let Some(p) = &req.path {
+        script.push_str("cd ");
+        script.push_str(&shell_quote(p));
+        script.push_str(" && ");
+    }
+    script.push_str("git push ");
     script.push_str(&shell_quote(remote));
     script.push(' ');
     script.push_str(&shell_quote(branch));
