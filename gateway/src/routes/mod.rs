@@ -23,6 +23,7 @@ pub mod pty;
 pub mod roles;
 pub mod tasks;
 pub mod workflows;
+pub mod images;
 
 use crate::crypto::hybrid_kem::PushKeys;
 use crate::crypto::hybrid_sig::AuditKeys;
@@ -195,6 +196,13 @@ pub fn build_router(
         // Admin
         .route("/admin/tenant", axum::routing::post(admin::create_tenant))
         .route("/admin/tenant/:id", axum::routing::get(admin::get_tenant))
+        // Image management (build/push/pull/list) — Stronghold-internal OCI registry
+        .route("/admin/images/build", axum::routing::post(images::build_image))
+        .route("/admin/images/push", axum::routing::post(images::push_image))
+        .route("/admin/images/pull", axum::routing::post(images::pull_image))
+        .route("/admin/images", axum::routing::get(images::list_images))
+        .route("/admin/images/:name/tags", axum::routing::get(images::list_tags))
+        .route("/admin/images/:name/exists", axum::routing::get(images::check_exists))
         // Setup (one-time enrollment)
         .route("/setup", axum::routing::get(phone::setup_page))
         // Attestation

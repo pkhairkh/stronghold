@@ -339,7 +339,11 @@ fn build_command(
         script.push_str(" && ");
     }
     for (k, val) in env {
-        script.push_str(&shell_quote(k));
+        // NOTE: env var names are restricted to [A-Za-z_][A-Za-z0-9_]*
+        // (POSIX) and are always safe to emit unquoted. Quoting the KEY
+        // (e.g. 'DEEP_TEST_VAR'='value') makes sh treat the assignment
+        // as a command, not an env-var assignment.
+        script.push_str(k);
         script.push('=');
         script.push_str(&shell_quote(val));
         script.push(' ');

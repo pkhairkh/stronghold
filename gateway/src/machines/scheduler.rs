@@ -143,8 +143,10 @@ pub async fn schedule(
         return Err(anyhow::anyhow!("Tenant quota exceeded"));
     }
 
-    // Generate pod name
-    let pod_name = format!("agent-{}", ulid::Ulid::new());
+    // Generate pod name — must be a lowercase RFC 1123 subdomain.
+    // ULIDs are uppercase by default; lowercase the whole thing. The ULID
+    // alphabet (0-9A-HJKMNP-TV-Z) lowercased stays within RFC 1123 charset.
+    let pod_name = format!("agent-{}", ulid::Ulid::new().to_string().to_lowercase());
 
     // Get k8s client
     let client = get_kube_client().await?;
@@ -200,14 +202,29 @@ pub async fn schedule(
                 {"name": "work", "persistentVolumeClaim": {"claimName": &work_pvc}},
                 {"name": "cache", "emptyDir": {}}
             ],
-            "restartPolicy": "Never"
+            "restartPolicy": "Never",
+            "securityContext": {
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "fsGroupChangePolicy": "OnRootMismatch"
+            }
         }
     }))?;
 
     // Create the pod
-    pods.create(&Default::default(), &pod)
-        .await
-        .context("failed to create pod")?;
+    if let Err(e) = pods.create(&Default::default(), &pod).await {
+        // Log the full error (including k8s API reason) before propagating
+        let err_str = format!("{e:#}");
+        tracing::error!(
+            pod = %pod_name,
+            tenant = tenant_id,
+            image = %req.image,
+            error = %err_str,
+            "k8s pod create failed"
+        );
+        return Err(e).context("failed to create pod");
+    }
 
     tracing::info!(
         tenant = tenant_id,
