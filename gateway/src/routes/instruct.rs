@@ -12,7 +12,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Request to inject a new instruction into a running session.
 #[derive(Debug, Deserialize)]
