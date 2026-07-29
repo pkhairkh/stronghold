@@ -278,6 +278,124 @@
         @media (pointer: coarse) {
             button, input { min-height: 48px; }
         }
+
+        /* --- Task monitoring (O1) --- */
+        .task-card {
+            border-left: 3px solid var(--text-faint);
+        }
+        .task-card.status-queued,
+        .task-card.status-scheduled,
+        .task-card.status-cancelled { border-left-color: var(--text-faint); }
+        .task-card.status-running { border-left-color: var(--accent); }
+        .task-card.status-completed { border-left-color: var(--primary); }
+        .task-card.status-failed { border-left-color: var(--danger); }
+
+        .status-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+        .status-badge.queued,
+        .status-badge.scheduled,
+        .status-badge.cancelled {
+            background: rgba(170, 170, 170, 0.2);
+            color: var(--text-muted);
+        }
+        .status-badge.running {
+            background: rgba(96, 165, 250, 0.2);
+            color: var(--accent);
+        }
+        .status-badge.completed {
+            background: rgba(74, 222, 128, 0.2);
+            color: var(--primary);
+        }
+        .status-badge.failed {
+            background: rgba(248, 113, 113, 0.2);
+            color: var(--danger);
+        }
+
+        .task-instruction {
+            font-size: 0.95rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+        .task-meta {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+        }
+        .task-meta code {
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        .task-summary {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            background: var(--bg-input);
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            margin-top: 6px;
+            word-break: break-word;
+        }
+        .task-cmd {
+            font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            background: var(--bg-input);
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            margin-top: 6px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        /* Workflow steps list */
+        .workflow-steps {
+            list-style: none;
+            margin: 8px 0 0;
+            padding: 0;
+        }
+        .workflow-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 6px 0;
+            font-size: 0.85rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .workflow-step:last-child { border-bottom: none; }
+        .workflow-step-icon {
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+            font-size: 0.95rem;
+            line-height: 1.2;
+        }
+        .workflow-step.done .workflow-step-icon { color: var(--primary); }
+        .workflow-step.running .workflow-step-icon { color: var(--accent); }
+        .workflow-step.failed .workflow-step-icon { color: var(--danger); }
+        .workflow-step.pending .workflow-step-icon { color: var(--text-faint); }
+        .workflow-step-name {
+            flex: 1;
+            color: var(--text);
+            word-break: break-word;
+        }
+        .workflow-step-state {
+            font-size: 0.7rem;
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
     </style>
 </head>
 <body>
@@ -354,6 +472,11 @@
             <h2 id="pending-heading">Pending Approvals</h2>
             <div id="pending-list" role="list" aria-label="Pending session approval requests">
                 <div class="info" id="pending-empty">No pending approvals</div>
+            </div>
+
+            <h2 id="tasks-heading">Tasks</h2>
+            <div id="tasks-list" role="list" aria-label="Active tasks for compute sessions">
+                <div class="info" id="tasks-empty">No active tasks</div>
             </div>
 
             <h2>Device</h2>
@@ -864,6 +987,9 @@
                     addPendingApproval(data);
                     break;
                 case 'session_started':
+                    addSessionCard(data);
+                    onSessionStarted(data);
+                    break;
                 case 'session_updated':
                     addSessionCard(data);
                     break;
@@ -871,6 +997,7 @@
                 case 'session_revoked':
                     if (data.machine_id || data.id) {
                         markSessionRevoked(data.machine_id || data.id);
+                        onSessionEnded(data.machine_id || data.id);
                     }
                     break;
                 case 'anomaly':
@@ -951,6 +1078,386 @@
             }
             haptic([50, 50, 50]);
             showToast('⚠ Anomaly detected');
+        }
+
+        // --- Task monitoring (O1) ---
+        // When a session_started SSE event arrives, subscribe to the task
+        // stream for each task_id in the payload. The task stream emits
+        // {task_id, status, result} on every status change; we render a card
+        // per task with instruction, status badge, duration, exit code,
+        // summary, and the latest command from the audit WebSocket.
+        //
+        // Task stream event types:
+        //   task_created   → status "queued"
+        //   task_started   → status "running"
+        //   task_completed → status "completed"
+        //   task_failed    → status "failed"
+        //   task_cancelled → status "cancelled"
+        //   task_status    → any other / not-found fallback
+        //
+        // All fields sourced from the session_started payload are optional —
+        // the UI degrades gracefully when the backend hasn't populated them.
+        const taskStreams = new Map();       // task_id → AbortController
+        const auditSockets = new Map();      // machine_id → WebSocket
+        const taskMachineMap = new Map();    // task_id → machine_id
+        const taskClientTimes = new Map();   // task_id → {started_at?, finished_at?}
+        const taskInstructions = new Map();  // task_id → instruction (from session_started)
+        const workflowRunCache = new Map();  // run_id → container element
+
+        function ensureTasksSection() {
+            const list = document.getElementById('tasks-list');
+            const empty = document.getElementById('tasks-empty');
+            if (empty) empty.remove();
+            return list;
+        }
+
+        function statusBadgeClass(status) {
+            const known = ['queued','scheduled','running','completed','failed','cancelled'];
+            return known.indexOf(status) >= 0 ? status : 'queued';
+        }
+
+        function statusLabel(status) {
+            const map = {
+                queued: 'Queued',
+                scheduled: 'Scheduled',
+                running: 'Running',
+                completed: 'Completed',
+                failed: 'Failed',
+                cancelled: 'Cancelled',
+                not_found: 'Not Found',
+            };
+            return map[status] || status;
+        }
+
+        // Format a duration between two ISO-8601 timestamps. If `finishedAt`
+        // is null and `startedAt` is set, compute elapsed-since-start using
+        // the client clock (so running tasks tick live on re-render).
+        function formatDuration(startedAt, finishedAt) {
+            if (!startedAt) return '—';
+            const start = Date.parse(startedAt);
+            if (Number.isNaN(start)) return '—';
+            const end = finishedAt ? Date.parse(finishedAt) : Date.now();
+            if (Number.isNaN(end)) return '—';
+            const ms = Math.max(0, end - start);
+            const s = Math.floor(ms / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.floor(s / 60);
+            const rem = s % 60;
+            if (m < 60) return m + 'm ' + rem + 's';
+            const h = Math.floor(m / 60);
+            const mm = m % 60;
+            return h + 'h ' + mm + 'm';
+        }
+
+        function addOrUpdateTaskCard(taskId, data) {
+            const list = ensureTasksSection();
+            const id = 'task-' + taskId;
+            let card = document.getElementById(id);
+            const isNew = !card;
+            if (isNew) {
+                card = document.createElement('div');
+                card.id = id;
+                card.setAttribute('role', 'listitem');
+                card.setAttribute('aria-label', 'Task ' + taskId);
+                list.appendChild(card);
+            }
+
+            const status = data.status || 'queued';
+            const machineId = taskMachineMap.get(taskId) || data.machine_id || '';
+            card.className = 'card task-card status-' + statusBadgeClass(status);
+            card.setAttribute('data-machine', machineId);
+
+            // Instruction: prefer server-provided spec, fall back to the
+            // instruction captured from the session_started payload.
+            const spec = data.spec || {};
+            let instruction = spec.instruction || data.instruction || '';
+            if (!instruction) instruction = taskInstructions.get(taskId) || '(no instruction)';
+
+            const image = spec.image || data.image || '';
+            const result = data.result || {};
+            const exitCode = (result.exit_code !== undefined && result.exit_code !== null)
+                ? result.exit_code : '';
+            const summary = result.summary || '';
+            const error = data.error || '';
+            const times = taskClientTimes.get(taskId) || {};
+            const startedAt = data.started_at || times.started_at || '';
+            const finishedAt = data.finished_at || times.finished_at || '';
+            const duration = formatDuration(startedAt, finishedAt);
+            const lastCmd = card.getAttribute('data-last-cmd') || '';
+
+            let html =
+                '<div class="task-instruction">' +
+                    escapeHtml(instruction) +
+                    '<span class="status-badge ' + statusBadgeClass(status) + '">' +
+                        escapeHtml(statusLabel(status)) +
+                    '</span>' +
+                '</div>';
+            if (image) {
+                html += '<div class="task-meta">Image: ' + escapeHtml(image) + '</div>';
+            }
+            html += '<div class="task-meta">Task: <code>' + escapeHtml(taskId) + '</code></div>';
+            html += '<div class="task-meta">Duration: ' + escapeHtml(duration) + '</div>';
+            if (exitCode !== '') {
+                const cls = exitCode === 0 ? 'completed' : 'failed';
+                html += '<div class="task-meta">Exit: <span class="status-badge ' + cls + '">' +
+                    escapeHtml(String(exitCode)) + '</span></div>';
+            }
+            if (summary) {
+                html += '<div class="task-summary">' + escapeHtml(summary) + '</div>';
+            }
+            if (error) {
+                html += '<div class="task-summary" style="color:var(--danger)">' +
+                    escapeHtml(error) + '</div>';
+            }
+            if (lastCmd) {
+                html += '<div class="task-cmd">$ ' + escapeHtml(lastCmd) + '</div>';
+            }
+            if (status === 'queued' && !startedAt) {
+                html += '<div class="info">Waiting for agent to start…</div>';
+            }
+
+            card.innerHTML = html;
+        }
+
+        // Subscribe to the task's SSE stream (GET /agent/task/:id/stream).
+        // The stream emits a status event immediately, then re-emits only
+        // on status changes; a heartbeat keeps the connection alive.
+        function subscribeToTaskStream(taskId, machineId) {
+            if (machineId) taskMachineMap.set(taskId, machineId);
+            if (taskStreams.has(taskId)) return; // dedupe
+            const controller = new AbortController();
+            taskStreams.set(taskId, controller);
+
+            (async () => {
+                try {
+                    const response = await fetch(
+                        `${GATEWAY_URL}/agent/task/${encodeURIComponent(taskId)}/stream`,
+                        {
+                            method: 'GET',
+                            headers: {
+                                'Authorization': `Bearer ${PHONE_TOKEN}`,
+                                'Accept': 'text/event-stream',
+                                'Cache-Control': 'no-cache',
+                            },
+                            signal: controller.signal,
+                        }
+                    );
+                    if (!response.ok || !response.body) return;
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const frames = buffer.split('\n\n');
+                        buffer = frames.pop() || '';
+                        for (const frame of frames) {
+                            handleTaskSSEFrame(taskId, frame);
+                        }
+                    }
+                } catch (err) {
+                    if (err && err.name === 'AbortError') return;
+                    console.warn('Task SSE error:', taskId, err);
+                }
+            })();
+        }
+
+        function handleTaskSSEFrame(taskId, frame) {
+            let eventType = '';
+            let dataStr = '';
+            for (const rawLine of frame.split('\n')) {
+                const line = rawLine.replace(/\r$/, '');
+                if (line.startsWith(':')) continue;
+                if (line.startsWith('event:')) {
+                    eventType = line.slice(6).trim();
+                } else if (line.startsWith('data:')) {
+                    dataStr += line.slice(5).replace(/^ /, '') + '\n';
+                }
+            }
+            if (dataStr.trim() === 'heartbeat') return;
+            if (!dataStr) return;
+
+            let data;
+            try {
+                data = JSON.parse(dataStr.replace(/\n$/, ''));
+            } catch (_) {
+                return;
+            }
+
+            // The task stream payload is {task_id, status, result} — it does
+            // NOT include started_at/finished_at, so we capture client-side
+            // timestamps on the running → terminal transitions for an
+            // approximate duration.
+            const times = taskClientTimes.get(taskId) || {};
+            if (eventType === 'task_started' || data.status === 'running') {
+                if (!times.started_at) times.started_at = new Date().toISOString();
+            }
+            if (eventType === 'task_completed' ||
+                eventType === 'task_failed' ||
+                eventType === 'task_cancelled' ||
+                data.status === 'completed' ||
+                data.status === 'failed' ||
+                data.status === 'cancelled') {
+                if (!times.finished_at) times.finished_at = new Date().toISOString();
+            }
+            taskClientTimes.set(taskId, times);
+
+            addOrUpdateTaskCard(taskId, data);
+        }
+
+        // Audit WebSocket — pulls the latest cmd_exec for a machine so the
+        // task card can show "$ <command>" in real time. The audit stream
+        // emits JSON objects: {seq, ts, event, payload}.
+        function connectAuditWebSocket(machineId) {
+            if (!machineId || auditSockets.has(machineId)) return;
+            const wsUrl = GATEWAY_URL.replace(/^http/, 'ws') +
+                '/agent/' + encodeURIComponent(machineId) + '/audit';
+            let ws;
+            try {
+                ws = new WebSocket(wsUrl);
+            } catch (err) {
+                console.warn('Audit WS error:', err);
+                return;
+            }
+            auditSockets.set(machineId, ws);
+
+            ws.onmessage = (event) => {
+                let msg;
+                try { msg = JSON.parse(event.data); } catch (_) { return; }
+                if (msg.event === 'cmd_exec' && msg.payload && msg.payload.cmd) {
+                    updateLatestCommand(machineId, msg.payload.cmd);
+                }
+            };
+            ws.onclose = () => {
+                auditSockets.delete(machineId);
+                // Best-effort reconnect after 5s while still enrolled.
+                setTimeout(() => {
+                    if (localStorage.getItem('stronghold_phone_token')) {
+                        connectAuditWebSocket(machineId);
+                    }
+                }, 5000);
+            };
+            ws.onerror = () => { try { ws.close(); } catch (_) {} };
+        }
+
+        function updateLatestCommand(machineId, cmd) {
+            const cards = document.querySelectorAll('.task-card');
+            cards.forEach((card) => {
+                if (card.getAttribute('data-machine') === machineId) {
+                    card.setAttribute('data-last-cmd', cmd);
+                    let cmdEl = card.querySelector('.task-cmd');
+                    if (!cmdEl) {
+                        cmdEl = document.createElement('div');
+                        cmdEl.className = 'task-cmd';
+                        card.appendChild(cmdEl);
+                    }
+                    cmdEl.textContent = '$ ' + cmd;
+                }
+            });
+        }
+
+        // Render a simple list of workflow steps with ✅/⏳/❌ indicators.
+        // `steps` is an array of {id, task, status} where status is one of
+        // "pending" | "running" | "completed" | "failed" | "skipped".
+        function renderWorkflowSteps(runId, workflowName, steps, runStatus) {
+            if (!runId || !Array.isArray(steps) || !steps.length) return;
+            let container = workflowRunCache.get(runId);
+            if (!container) {
+                container = document.createElement('div');
+                container.className = 'card task-card';
+                container.id = 'workflow-' + runId;
+                container.setAttribute('role', 'listitem');
+                container.setAttribute('aria-label', 'Workflow run ' + runId);
+                const list = ensureTasksSection();
+                list.appendChild(container);
+                workflowRunCache.set(runId, container);
+            }
+
+            const overall = runStatus || 'running';
+            let html = '<div class="task-instruction">Workflow: ' +
+                escapeHtml(workflowName || runId) +
+                '<span class="status-badge ' + statusBadgeClass(overall) + '">' +
+                    escapeHtml(statusLabel(overall)) +
+                '</span></div>';
+            html += '<div class="task-meta">Run: <code>' + escapeHtml(runId) + '</code></div>';
+            html += '<ul class="workflow-steps">';
+
+            for (const step of steps) {
+                const stepId = step.id || '?';
+                const stepTask = step.task || '';
+                const stepStatus = step.status || 'pending';
+                let icon, cls, stateLabel;
+                if (stepStatus === 'completed') {
+                    icon = '✅'; cls = 'done'; stateLabel = 'done';
+                } else if (stepStatus === 'running') {
+                    icon = '⏳'; cls = 'running'; stateLabel = 'running';
+                } else if (stepStatus === 'failed') {
+                    icon = '❌'; cls = 'failed'; stateLabel = 'failed';
+                } else if (stepStatus === 'skipped') {
+                    icon = '➖'; cls = 'pending'; stateLabel = 'skipped';
+                } else {
+                    icon = '⏳'; cls = 'pending'; stateLabel = 'pending';
+                }
+                html += '<li class="workflow-step ' + cls + '">' +
+                    '<span class="workflow-step-icon" aria-hidden="true">' + icon + '</span>' +
+                    '<span class="workflow-step-name">' + escapeHtml(stepId) +
+                        (stepTask ? ': ' + escapeHtml(String(stepTask)) : '') +
+                    '</span>' +
+                    '<span class="workflow-step-state">' + escapeHtml(stateLabel) + '</span>' +
+                '</li>';
+            }
+            html += '</ul>';
+            container.innerHTML = html;
+        }
+
+        // Called when a session_started SSE event arrives. Subscribes to
+        // task streams, opens the audit WebSocket, and renders any inline
+        // workflow steps. All fields are optional — the UI degrades
+        // gracefully when the backend hasn't populated them yet.
+        function onSessionStarted(data) {
+            const machineId = data.machine_id || data.id;
+            if (machineId) {
+                connectAuditWebSocket(machineId);
+            }
+            // The payload may carry a single task_id or an array task_ids.
+            const taskIds = [];
+            if (Array.isArray(data.task_ids)) {
+                for (const t of data.task_ids) {
+                    if (typeof t === 'string' && t) taskIds.push(t);
+                }
+            } else if (typeof data.task_id === 'string' && data.task_id) {
+                taskIds.push(data.task_id);
+            }
+            for (const tid of taskIds) {
+                if (data.instruction) taskInstructions.set(tid, data.instruction);
+                subscribeToTaskStream(tid, machineId);
+            }
+            // Inline workflow steps (forward-compatible with future
+            // session_started payloads that include a workflow snapshot).
+            if (data.workflow_steps && data.workflow_run_id) {
+                renderWorkflowSteps(
+                    data.workflow_run_id,
+                    data.workflow_name,
+                    data.workflow_steps,
+                    data.workflow_status
+                );
+            }
+        }
+
+        // Clean up task streams + audit socket for a machine that ended.
+        function onSessionEnded(machineId) {
+            if (auditSockets.has(machineId)) {
+                try { auditSockets.get(machineId).close(); } catch (_) {}
+                auditSockets.delete(machineId);
+            }
+            for (const [tid, mid] of taskMachineMap.entries()) {
+                if (mid === machineId) {
+                    const ctrl = taskStreams.get(tid);
+                    if (ctrl) { try { ctrl.abort(); } catch (_) {} }
+                    taskStreams.delete(tid);
+                }
+            }
         }
 
         // --- View switching ---
