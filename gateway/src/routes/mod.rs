@@ -12,12 +12,15 @@ pub mod agent;
 pub mod attestation;
 pub mod credentials;
 pub mod exec;
+pub mod facilitator;
 pub mod git;
 pub mod instruct;
 pub mod messages;
 pub mod metrics;
+pub mod oracle;
 pub mod phone;
 pub mod pty;
+pub mod roles;
 pub mod tasks;
 pub mod workflows;
 
@@ -166,6 +169,24 @@ pub fn build_router(
         .route("/agent/:machine_id/messages", axum::routing::post(messages::post_message))
         .route("/agent/:machine_id/messages", axum::routing::get(messages::poll_messages))
         .route("/agent/:machine_id/messages/stream", axum::routing::get(messages::stream_messages))
+        // Oracle Q&A
+        .route("/agent/:machine_id/oracle", axum::routing::post(oracle::ask_oracle))
+        .route("/agent/:machine_id/oracle/:question_id", axum::routing::get(oracle::get_answer))
+        // Facilitator (disagreement mediation)
+        .route("/agent/:machine_id/disagreement", axum::routing::post(facilitator::submit_disagreement))
+        .route("/agent/:machine_id/disagreement/:id", axum::routing::get(facilitator::get_decision))
+        // Agent roles
+        .route("/admin/roles", axum::routing::post(roles::create_role))
+        .route("/admin/roles", axum::routing::get(roles::list_roles))
+        .route("/admin/roles/:id", axum::routing::get(roles::get_role))
+        .route("/admin/roles/:id", axum::routing::delete(roles::delete_role))
+        .route("/admin/roles/seed", axum::routing::post(roles::seed_roles))
+        .route("/admin/constitution", axum::routing::get(roles::get_constitution))
+        // Progress + Reflexion (added to tasks module)
+        .route("/agent/task/:id/progress", axum::routing::post(tasks::submit_progress))
+        .route("/agent/task/:id/reflexion", axum::routing::post(tasks::submit_reflexion))
+        .route("/agent/task/:id/reflexion", axum::routing::get(tasks::get_reflexion))
+        .route("/agent/reflexions", axum::routing::get(tasks::list_reflexions))
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))
