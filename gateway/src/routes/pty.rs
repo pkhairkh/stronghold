@@ -8,6 +8,7 @@
 //! - `GET /agent/:machine_id/pty` — WebSocket PTY (bidirectional)
 //! - `GET /agent/:machine_id/audit` — WebSocket audit stream (read-only)
 
+use crate::anomaly::AnomalyScanner;
 use crate::routes::AppState;
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
@@ -133,15 +134,15 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
         }
     };
 
-    // Spawn audit logger
-    let audit_handle = tokio::spawn({
-        let machine_id = machine_id.clone();
-        let state = state.clone();
-        async move {
-            // TODO: stream bytes to audit log
-            let _ = (machine_id, state);
-        }
-    });
+    // Anomaly scanner — loaded once with default patterns (curl/wget/scp,
+    // rm -rf, sudo, ssh). Each chunk of PTY output is scanned below.
+    let scanner = AnomalyScanner::defaults();
+
+    // TODO(tenant-resolution): the PTY route is keyed only by `machine_id`.
+    // Once `machines.tenant_id` is populated by the scheduler, look it up
+    // here and replace the placeholder. Using "unknown" so audit entries
+    // still land in a queryable bucket rather than being dropped.
+    let tenant_id = "unknown".to_string();
 
     // Bidirectional proxy
     loop {
@@ -154,12 +155,14 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
                             tracing::error!(error = %e, "PTY write error");
                             break;
                         }
+                        log_cmd_exec(&state, &tenant_id, &machine_id, &data);
                     }
                     Some(Ok(Message::Text(text))) => {
                         if let Err(e) = pty.write_all(text.as_bytes()).await {
                             tracing::error!(error = %e, "PTY write error");
                             break;
                         }
+                        log_cmd_exec(&state, &tenant_id, &machine_id, text.as_bytes());
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
@@ -169,6 +172,34 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
             data = pty.read() => {
                 match data {
                     Ok(bytes) => {
+                        // Scan output for anomalies BEFORE moving `bytes`
+                        // into the outgoing WebSocket message.
+                        let text = String::from_utf8_lossy(&bytes);
+                        for p in scanner.scan(&text) {
+                            tracing::warn!(
+                                pattern = %p.message,
+                                machine = %machine_id,
+                                "Anomaly detected in PTY output"
+                            );
+                            let snippet = text.get(..200).unwrap_or(&text[..]);
+                            if let Err(e) = crate::audit::log::entry(
+                                &state.db,
+                                &tenant_id,
+                                &machine_id,
+                                "anomaly_detected",
+                                serde_json::json!({
+                                    "pattern": p.message,
+                                    "output_snippet": snippet,
+                                }),
+                                &state.audit_keys,
+                            ) {
+                                tracing::error!(
+                                    error = %e,
+                                    "Failed to write anomaly_detected audit entry"
+                                );
+                            }
+                        }
+
                         if let Err(e) = ws_sender.send(Message::Binary(bytes)).await {
                             tracing::error!(error = %e, "WebSocket send error");
                             break;
@@ -183,8 +214,33 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
         }
     }
 
-    audit_handle.abort();
     tracing::info!(machine = %machine_id, "PTY WebSocket closed");
+}
+
+/// Write a `cmd_exec` audit entry for a command the agent sent to the PTY.
+///
+/// `raw` is the raw bytes of the WebSocket frame (binary or text); it is
+/// converted to lossy UTF-8 and truncated to 200 bytes for the audit
+/// payload. Audit writes are best-effort — failures are logged but do not
+/// break the PTY session.
+fn log_cmd_exec(
+    state: &AppState,
+    tenant_id: &str,
+    machine_id: &str,
+    raw: &[u8],
+) {
+    let cmd = String::from_utf8_lossy(raw);
+    let snippet = cmd.get(..200).unwrap_or(&cmd[..]);
+    if let Err(e) = crate::audit::log::entry(
+        &state.db,
+        tenant_id,
+        machine_id,
+        "cmd_exec",
+        serde_json::json!({ "cmd": snippet }),
+        &state.audit_keys,
+    ) {
+        tracing::error!(error = %e, "Failed to write cmd_exec audit entry");
+    }
 }
 
 /// Read-only audit stream (for phone "WATCH LIVE" feature).
