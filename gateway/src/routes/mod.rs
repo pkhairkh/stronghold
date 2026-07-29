@@ -10,9 +10,11 @@
 pub mod admin;
 pub mod agent;
 pub mod attestation;
+pub mod exec;
 pub mod metrics;
 pub mod phone;
 pub mod pty;
+pub mod tasks;
 
 use crate::crypto::hybrid_kem::PushKeys;
 use crate::crypto::hybrid_sig::AuditKeys;
@@ -103,6 +105,18 @@ pub fn build_router(
         .route(
             "/agent/:machine_id/audit",
             axum::routing::get(pty::handle_audit_ws),
+        )
+        // Structured exec (JSON command → JSON result)
+        .route(
+            "/agent/:machine_id/exec",
+            axum::routing::post(exec::exec_command),
+        )
+        // Task lifecycle
+        .route("/agent/task", axum::routing::post(tasks::create_task))
+        .route("/agent/task/:id", axum::routing::get(tasks::get_task))
+        .route(
+            "/agent/task/:id/result",
+            axum::routing::post(tasks::submit_result),
         )
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
