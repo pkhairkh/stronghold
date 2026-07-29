@@ -1,0 +1,112 @@
+name: Holistic Integration Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  holistic-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev libsqlite3-dev \
+            jq curl sqlite3 buildah podman k3d
+
+      - name: Install websocat
+        run: |
+          curl -sSL https://github.com/nickelc/websocat/releases/download/v1.13.0/websocat.x86_64-unknown-linux-musl \
+            -o /usr/local/bin/websocat
+          chmod +x /usr/local/bin/websocat
+
+      - name: Start k3s cluster
+        run: |
+          curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.36.2+k3s1 sh -
+          sleep 15
+          sudo cat /etc/rancher/k3s/k3s.yaml > /tmp/kubeconfig
+          sed -i 's|127.0.0.1|localhost|g' /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl get nodes
+
+      - name: Build gateway (dev mode, no SEV-SNP)
+        run: cargo build --workspace --features no-sev-snp
+
+      - name: Build rocky-base image
+        run: |
+          # Use the build script to build + push to a local registry
+          # The script handles microdnf/EPEL/CRB adaptations for Rocky 9
+          python3 scripts/build_rocky_base.py || true
+
+      - name: Start mock ntfy server
+        run: |
+          # Mock ntfy — accepts any POST, returns 200
+          python3 -c "
+          import http.server, socketserver, sys
+          class N(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  l = int(self.headers.get('Content-Length', 0) or 0)
+                  self.rfile.read(l) if l else None
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  self.wfile.write(b'{\"id\":\"mock\"}')
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'text/event-stream')
+                  self.end_headers()
+              def log_message(self, *a): pass
+          socketserver.ThreadingTCPServer(('0.0.0.0', 8090), N).serve_forever()
+          " &
+          sleep 1
+          curl -s -X POST http://localhost:8090/test -d hello
+
+      - name: Start Stronghold gateway
+        run: |
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          export RUST_LOG=stronghold_gateway=info,tower_http=info
+          export STRONGHOLD_NTFY_URL=http://localhost:8090
+          mkdir -p /var/lib/stronghold/keys /var/lib/stronghold/audit
+          sudo ./target/debug/stronghold-gateway serve --bind 0.0.0.0:8443 --dev &
+          sleep 5
+          curl -sk https://localhost:8443/agent/health -o /dev/null -w "http=%{http_code}\n"
+
+      - name: Run holistic test (49 checks)
+        run: |
+          chmod +x scripts/holistic_test.sh
+          bash scripts/holistic_test.sh
+        env:
+          STRONGHOLD_URL: https://localhost:8443
+          DB: /var/lib/stronghold/stronghold.db
+
+      - name: Run deep integration test (35 checks, real k3s pods)
+        run: |
+          chmod +x scripts/deep_test.sh
+          bash scripts/deep_test.sh
+        env:
+          STRONGHOLD_URL: https://localhost:8443
+          DB: /var/lib/stronghold/stronghold.db
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+      - name: Upload gateway logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stronghold-gateway-logs
+          path: |
+            /tmp/stronghold-gateway.log
+            /tmp/holistic_run*.log
+            /tmp/deep_run*.log
