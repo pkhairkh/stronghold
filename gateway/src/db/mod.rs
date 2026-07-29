@@ -93,6 +93,101 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         tracing::info!("Migration 002 applied");
     }
 
+    // Migration 003: add task/workflow/credential/message tables.
+    let applied_003: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _migrations WHERE id = 3",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if applied_003 == 0 {
+        tracing::info!("Running migration 003: task/workflow/credential tables");
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id              TEXT PRIMARY KEY,
+                tenant_id       TEXT NOT NULL,
+                machine_id      TEXT,
+                parent_task_id  TEXT,
+                workflow_run_id TEXT,
+                status          TEXT DEFAULT 'queued',
+                spec            TEXT NOT NULL,
+                result          TEXT,
+                created_at      TEXT NOT NULL,
+                started_at      TEXT,
+                finished_at     TEXT,
+                error           TEXT,
+                retry_count     INTEGER DEFAULT 0,
+                max_retries     INTEGER DEFAULT 3,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+                FOREIGN KEY (machine_id) REFERENCES machines(id)
+            );
+            CREATE TABLE IF NOT EXISTS workflows (
+                id              TEXT PRIMARY KEY,
+                tenant_id       TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                dag             TEXT NOT NULL,
+                status          TEXT DEFAULT 'draft',
+                created_at      TEXT NOT NULL,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            );
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id              TEXT PRIMARY KEY,
+                workflow_id     TEXT NOT NULL,
+                tenant_id       TEXT NOT NULL,
+                status          TEXT DEFAULT 'pending',
+                current_steps   TEXT,
+                completed_steps TEXT,
+                started_at      TEXT,
+                finished_at     TEXT,
+                result          TEXT,
+                FOREIGN KEY (workflow_id) REFERENCES workflows(id),
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            );
+            CREATE TABLE IF NOT EXISTS task_outputs (
+                task_id         TEXT NOT NULL,
+                key             TEXT NOT NULL,
+                value           TEXT,
+                artifact_path   TEXT,
+                PRIMARY KEY (task_id, key),
+                FOREIGN KEY (task_id) REFERENCES tasks(id)
+            );
+            CREATE TABLE IF NOT EXISTS agent_credentials (
+                id              TEXT PRIMARY KEY,
+                tenant_id       TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                kind            TEXT NOT NULL,
+                encrypted_value BLOB NOT NULL,
+                nonce           BLOB NOT NULL,
+                env_var         TEXT,
+                mount_path      TEXT,
+                created_at      TEXT NOT NULL,
+                rotated_at      TEXT,
+                UNIQUE(tenant_id, name),
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            );
+            CREATE TABLE IF NOT EXISTS agent_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_machine    TEXT NOT NULL,
+                to_machine      TEXT,
+                channel         TEXT NOT NULL,
+                body            TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id, status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_machine ON tasks(machine_id);
+            CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+            CREATE INDEX IF NOT EXISTS idx_agent_credentials_tenant ON agent_credentials(tenant_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_channel ON agent_messages(channel, created_at);"
+        )?;
+        tx.execute(
+            "INSERT INTO _migrations (id, name, applied_at) VALUES (3, 'task_workflow_credential_tables', datetime('now'))",
+            [],
+        )?;
+        tx.commit()?;
+        tracing::info!("Migration 003 applied");
+    }
+
     Ok(())
 }
 
@@ -163,7 +258,7 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[test]
@@ -200,5 +295,36 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
             .unwrap();
         assert_eq!(fk_enabled, 1);
+    }
+
+    #[test]
+    fn test_task_workflow_credential_tables_exist() {
+        let pool = init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(tables.contains(&"tasks".to_string()), "tasks table missing");
+        assert!(tables.contains(&"workflows".to_string()), "workflows table missing");
+        assert!(
+            tables.contains(&"workflow_runs".to_string()),
+            "workflow_runs table missing"
+        );
+        assert!(
+            tables.contains(&"task_outputs".to_string()),
+            "task_outputs table missing"
+        );
+        assert!(
+            tables.contains(&"agent_credentials".to_string()),
+            "agent_credentials table missing"
+        );
+        assert!(
+            tables.contains(&"agent_messages".to_string()),
+            "agent_messages table missing"
+        );
     }
 }

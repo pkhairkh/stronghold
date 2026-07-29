@@ -134,6 +134,88 @@ CREATE TABLE IF NOT EXISTS workers (
     last_seen       TEXT
 );
 
+-- Tasks (structured work units with lifecycle)
+CREATE TABLE IF NOT EXISTS tasks (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    machine_id      TEXT,
+    parent_task_id  TEXT,
+    workflow_run_id TEXT,
+    status          TEXT DEFAULT 'queued',   -- queued, scheduled, running, completed, failed, cancelled
+    spec            TEXT NOT NULL,           -- JSON: {instruction, context, timeout_secs, image}
+    result          TEXT,                    -- JSON: {exit_code, stdout, stderr, summary, artifacts}
+    created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    error           TEXT,
+    retry_count     INTEGER DEFAULT 0,
+    max_retries     INTEGER DEFAULT 3,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    FOREIGN KEY (machine_id) REFERENCES machines(id)
+);
+
+-- Workflows (DAG definitions)
+CREATE TABLE IF NOT EXISTS workflows (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    dag             TEXT NOT NULL,           -- JSON DAG: {steps: [{id, task, depends_on, condition}]}
+    status          TEXT DEFAULT 'draft',    -- draft, active, archived
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+-- Workflow runs (execution instances)
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id              TEXT PRIMARY KEY,
+    workflow_id     TEXT NOT NULL,
+    tenant_id       TEXT NOT NULL,
+    status          TEXT DEFAULT 'pending',  -- pending, running, completed, failed, cancelled
+    current_steps   TEXT,                    -- JSON array of step IDs currently running
+    completed_steps TEXT,                    -- JSON array of completed step IDs
+    started_at      TEXT,
+    finished_at     TEXT,
+    result          TEXT,                    -- JSON summary of all step results
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+-- Task outputs (artifact passing between tasks)
+CREATE TABLE IF NOT EXISTS task_outputs (
+    task_id         TEXT NOT NULL,
+    key             TEXT NOT NULL,
+    value           TEXT,
+    artifact_path   TEXT,
+    PRIMARY KEY (task_id, key),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+-- Credential vault (encrypted secrets for agent use)
+CREATE TABLE IF NOT EXISTS agent_credentials (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    kind            TEXT NOT NULL,           -- ssh_key, api_token, env_var, file
+    encrypted_value BLOB NOT NULL,
+    nonce           BLOB NOT NULL,
+    env_var         TEXT,                    -- e.g., "GITHUB_TOKEN" (for env injection)
+    mount_path      TEXT,                    -- e.g., "/home/dev/.ssh/id_ed25519" (for file injection)
+    created_at      TEXT NOT NULL,
+    rotated_at      TEXT,
+    UNIQUE(tenant_id, name),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+-- Agent messages (inter-agent communication)
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_machine    TEXT NOT NULL,
+    to_machine      TEXT,
+    channel         TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_entries(tenant_id, seq);
 CREATE INDEX IF NOT EXISTS idx_machines_tenant ON machines(tenant_id, status);
@@ -141,3 +223,8 @@ CREATE INDEX IF NOT EXISTS idx_pending_tenant ON pending_sessions(tenant_id, sta
 CREATE INDEX IF NOT EXISTS idx_agent_tokens_hash ON agent_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_phone_tokens_hash ON phone_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials(tenant_id, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_machine ON tasks(machine_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+CREATE INDEX IF NOT EXISTS idx_agent_credentials_tenant ON agent_credentials(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_channel ON agent_messages(channel, created_at);
