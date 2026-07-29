@@ -225,7 +225,7 @@ impl AuditKeys {
         }
         let mut seed = [0u8; MLDSA_SEED_LEN];
         seed.copy_from_slice(&self.mldsa_secret);
-        let sk = MlDsaSigningKey::<MlDsa65>::new(&seed);
+        let sk = MlDsaSigningKey::<MlDsa65>::new((&seed).into());
         use ml_dsa::Signer;
         let sig = sk.sign(message);
         let sig_bytes = sig.encode();
@@ -287,10 +287,7 @@ impl AuditKeys {
             Ok(arr) => arr,
             Err(_) => return false,
         };
-        // Safety: Array<u8, N> is layout-compatible with [u8; N].
-        let vk_key_ref: &ml_dsa::array::Array<u8, _> =
-            unsafe { &*(vk_arr as *const [u8; MLDSA_PUBLIC_LEN] as *const ml_dsa::array::Array<u8, _>) };
-        let vk = ml_dsa::VerifyingKey::<MlDsa65>::new(vk_key_ref);
+        let vk = ml_dsa::VerifyingKey::<MlDsa65>::new(vk_arr.into());
 
         // Decode signature via TryFrom<&[u8]>.
         let sig = match ml_dsa::Signature::<MlDsa65>::try_from(sig_bytes.as_slice()) {
