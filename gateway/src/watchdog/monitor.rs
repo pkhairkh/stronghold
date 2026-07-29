@@ -46,7 +46,7 @@ async fn monitor_cycle(
         return Ok(());
     }
 
-    for (machine_id, tenant_id, task_id, task_spec) in machines {
+    for (machine_id, _tenant_id, task_id, task_spec) in machines {
         // Fetch recent audit entries for this machine (last 5 minutes)
         let entries = get_recent_audit_entries(state, &machine_id, 5)?;
         if entries.is_empty() {
@@ -137,9 +137,11 @@ async fn monitor_cycle(
 }
 
 /// Get all active machines with their current task.
+type MachineInfo = (String, String, Option<String>, String);
+
 fn get_active_machines(
     state: &AppState,
-) -> anyhow::Result<Vec<(String, String, Option<String>, String)>> {
+) -> anyhow::Result<Vec<MachineInfo>> {
     let conn = state.db.get()?;
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tenant_id, t.id, t.spec
