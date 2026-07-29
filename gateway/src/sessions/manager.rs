@@ -126,13 +126,21 @@ pub async fn finalize_session(
     // Generate connect token
     let connect_token = format!("stronghold_sess_{}", ulid::Ulid::new());
 
+    // Hash the connect token for storage (never store the plaintext token)
+    use sha2::{Digest, Sha256};
+    let connect_token_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(connect_token.as_bytes());
+        hex::encode(hasher.finalize())
+    };
+
     // Record in machines table
     let conn = state.db.get()?;
     conn.execute(
         "INSERT INTO machines
-         (id, tenant_id, image, worker, status, cpu, memory_gb, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, datetime('now'),
-                 datetime('now', '+' || ?7 || ' seconds'))",
+         (id, tenant_id, image, worker, status, cpu, memory_gb, connect_token_hash, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, datetime('now'),
+                 datetime('now', '+' || ?8 || ' seconds'))",
         params![
             machine.id,
             tenant_id,
@@ -140,6 +148,7 @@ pub async fn finalize_session(
             machine.worker,
             req.compute.cpu.unwrap_or(4),
             req.compute.memory_gb.unwrap_or(8),
+            connect_token_hash,
             req.ttl_secs,
         ],
     )?;

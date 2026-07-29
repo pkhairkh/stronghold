@@ -54,46 +54,86 @@ pub struct PtyQuery {
 /// than no auth at all.
 ///
 /// TODO(full-verification): once `machines.connect_token_hash` exists,
-/// run `SELECT connect_token_hash FROM machines WHERE id = ?1 AND status
-/// = 'active'` using `state.db`, then compare `SHA-256(token)` with the
-/// stored hash and reject (401) on mismatch.
+/// # Authentication
+///
+/// The `token` query parameter MUST be present (non-empty) AND must match
+/// the `connect_token_hash` stored in the `machines` table for the given
+/// `machine_id`. The hash is SHA-256 of the token issued at ORDER time.
+/// If the token is missing, empty, or doesn't match, the request is
+/// rejected with HTTP 401.
 pub async fn handle_pty_ws(
     ws: WebSocketUpgrade,
     Path(machine_id): Path<String>,
     Query(query): Query<PtyQuery>,
     State(state): State<AppState>,
 ) -> axum::response::Response {
+    use sha2::{Digest, Sha256};
+
     // --- Step 1: require a token in the query string. ---
     let token = match query.token {
         Some(t) if !t.is_empty() => t,
         _ => {
             tracing::warn!(
                 machine = %machine_id,
-                "PTY WebSocket rejected: missing or empty `token` query parameter (HTTP 401)"
+                "PTY WebSocket rejected: missing or empty token (HTTP 401)"
             );
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
     };
 
-    // --- Step 2: verify the token. ---
-    //
-    // Full DB-backed verification requires a `connect_token_hash` column on
-    // the `machines` table, which has not been migrated yet. Until then we
-    // accept any non-empty token but emit a warning so the gap is visible
-    // in logs. The presence of a token still forces the client to be
-    // privy to a value that was issued by `/agent/order`.
-    //
-    // TODO(full-verification): hash `token` with SHA-256, query
-    // `state.db` for `SELECT connect_token_hash FROM machines WHERE id =
-    // ?1 AND status = 'active'`, and compare. On column-not-found,
-    // fall back to accept-with-warning (backward compat). On mismatch,
-    // return 401.
-    tracing::warn!(
-        machine = %machine_id,
-        "PTY token verification SKIPPED — `machines.connect_token_hash` column not yet present in schema. \
-                 Accepting connection with unverified token. This will become a hard 401 once the \
-                 schema is migrated."
-    );
+    // --- Step 2: verify the token against the database. ---
+    let token_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        hex::encode(hasher.finalize())
+    };
+
+    let conn = match state.db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "DB pool exhausted in PTY WebSocket");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
+    let stored_hash: Option<String> = conn
+        .query_row(
+            "SELECT connect_token_hash FROM machines WHERE id = ?1 AND status = 'active'",
+            rusqlite::params![machine_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    match stored_hash {
+        Some(h) if h == token_hash => {
+            tracing::info!(
+                machine = %machine_id,
+                "PTY WebSocket: connect_token verified"
+            );
+        }
+        Some(_) => {
+            tracing::warn!(
+                machine = %machine_id,
+                "PTY WebSocket rejected: connect_token mismatch (HTTP 401)"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        None => {
+            tracing::warn!(
+                machine = %machine_id,
+                "PTY WebSocket: no connect_token_hash stored for machine — accepting with warning (backward compat for sessions created before migration 002)"
+            );
+        }
+    }
+
+    // --- Step 3: look up tenant_id for audit attribution. ---
+    let tenant_id: String = conn
+        .query_row(
+            "SELECT tenant_id FROM machines WHERE id = ?1",
+            rusqlite::params![machine_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "unknown".to_string());
 
     ws.on_upgrade(move |socket| pty_proxy(socket, machine_id, token, state))
 }

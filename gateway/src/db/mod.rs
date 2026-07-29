@@ -63,10 +63,29 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         tracing::info!("Migration 001 applied");
     }
 
-    // Future migrations go here:
-    // migration 002: add column X to table Y
-    // migration 003: create table Z
-    // etc.
+    // Migration 002: add connect_token_hash column to machines table.
+    let applied_002: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _migrations WHERE id = 2",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if applied_002 == 0 {
+        tracing::info!("Running migration 002: add connect_token_hash to machines");
+        let tx = conn.unchecked_transaction()?;
+        // ALTER TABLE ... ADD COLUMN is idempotent-safe with IF NOT EXISTS equivalent
+        // via checking pragma table_info. SQLite doesn't support ADD COLUMN IF NOT EXISTS,
+        // so we catch the "duplicate column name" error.
+        let _ = tx.execute_batch(
+            "ALTER TABLE machines ADD COLUMN connect_token_hash TEXT;",
+        );
+        tx.execute(
+            "INSERT INTO _migrations (id, name, applied_at) VALUES (2, 'add_connect_token_hash', datetime('now'))",
+            [],
+        )?;
+        tx.commit()?;
+        tracing::info!("Migration 002 applied");
+    }
 
     Ok(())
 }

@@ -76,17 +76,18 @@ CREATE TABLE IF NOT EXISTS pending_sessions (
 
 -- Active/recent machines
 CREATE TABLE IF NOT EXISTS machines (
-    id              TEXT PRIMARY KEY,
-    tenant_id       TEXT NOT NULL,
-    image           TEXT NOT NULL,
-    worker          TEXT NOT NULL,
-    status          TEXT DEFAULT 'active',  -- active, released, revoked, expired, lost
-    cpu             INTEGER,
-    memory_gb       INTEGER,
-    worker_sev_snp  INTEGER DEFAULT 0,
-    created_at      TEXT NOT NULL,
-    expires_at      TEXT NOT NULL,
-    killed_at       TEXT,
+    id                  TEXT PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,
+    image               TEXT NOT NULL,
+    worker              TEXT NOT NULL,
+    status              TEXT DEFAULT 'active',  -- active, released, revoked, expired, lost
+    cpu                 INTEGER,
+    memory_gb           INTEGER,
+    worker_sev_snp      INTEGER DEFAULT 0,
+    connect_token_hash  TEXT,                   -- SHA-256 of the connect_token issued at ORDER time
+    created_at          TEXT NOT NULL,
+    expires_at          TEXT NOT NULL,
+    killed_at           TEXT,
     FOREIGN KEY (tenant_id) REFERENCES tenants(id)
 );
 
