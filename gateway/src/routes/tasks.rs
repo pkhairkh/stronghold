@@ -12,14 +12,21 @@
 //! - `POST /agent/task`           — Create a new queued task
 //! - `GET  /agent/task/:id`       — Fetch a task's status and details
 //! - `POST /agent/task/:id/result`— Submit a task's execution result
+//! - `GET  /agent/task/:id/stream`— Stream status updates via Server-Sent Events
 //!
 //! All endpoints require a valid agent bearer token (tenant-scoped).
 
 use crate::routes::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::Event;
+use axum::response::Sse;
 use axum::Json;
+use futures_util::Stream;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 // ============================================================================
 // Request / response types
@@ -295,9 +302,220 @@ pub async fn submit_result(
 }
 
 // ============================================================================
+// SSE stream
+// ============================================================================
+
+/// Stream a task's status as Server-Sent Events.
+///
+/// Emits the task's current status immediately, then polls the database every
+/// 500 ms and re-emits **only when the status changes**. A heartbeat comment
+/// is sent every 30 s to keep the connection alive. The stream closes once the
+/// task reaches a terminal state (`completed`, `failed`, `cancelled`).
+///
+/// Event types mirror the task lifecycle:
+/// - `task_created`   — status `queued`
+/// - `task_started`   — status `running`
+/// - `task_completed` — status `completed`
+/// - `task_failed`    — status `failed`
+/// - `task_cancelled` — status `cancelled`
+/// - `task_status`    — any other status (e.g. `scheduled`) / not-found fallback
+///
+/// Each event's data is a JSON object: `{"task_id","status","result"}`.
+///
+/// This handler intentionally takes no `Authorization` header — tenant
+/// scoping / authentication is expected to be applied by the router
+/// middleware that wires this up (added by the orchestrator).
+pub async fn stream_task(
+    Path(task_id): Path<String>,
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    // Clone the pool so the returned stream is `'static` and not tied to the
+    // borrowed `&AppState` (the pool is just an `Arc` around the shared
+    // connection pool, so cloning is cheap).
+    let db = state.db.clone();
+
+    let stream = async_stream::stream! {
+        // Last status we emitted on this stream. Seeded by the initial poll
+        // below; the `NotFound` / `Error` arms return early, so by the time
+        // we reach the polling loop this is always `Some`.
+        let mut last_status: Option<String>;
+
+        // 1. Emit the current status immediately.
+        match poll_task_status(&db, &task_id) {
+            PollOutcome::Found { status, result } => {
+                let terminal = is_terminal(&status);
+                yield Ok(task_event(&status, &task_id, result));
+                last_status = Some(status);
+                if terminal {
+                    // Already terminal — we've emitted the final state, close.
+                    return;
+                }
+            }
+            PollOutcome::NotFound => {
+                // Task doesn't exist — tell the client and close.
+                let payload = serde_json::json!({
+                    "task_id": task_id,
+                    "status": "not_found",
+                    "result": serde_json::Value::Null,
+                });
+                yield Ok(Event::default()
+                    .event("task_status")
+                    .data(payload.to_string()));
+                return;
+            }
+            PollOutcome::Error => {
+                // Couldn't read the initial state — close; client may retry.
+                return;
+            }
+        }
+
+        // 2. Poll every 500 ms for status changes; heartbeat every 30 s.
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+        // Delay (rather than burst) if a tick is missed while we were busy
+        // yielding events — keeps the cadence steady.
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Discard the immediate first tick so the first poll happens after
+        // 500 ms and the first heartbeat after 30 s.
+        poll_interval.tick().await;
+        heartbeat_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = poll_interval.tick() => {
+                    match poll_task_status(&db, &task_id) {
+                        PollOutcome::Found { status, result } => {
+                            // Only emit when the status actually changed.
+                            if last_status.as_deref() != Some(status.as_str()) {
+                                let terminal = is_terminal(&status);
+                                yield Ok(task_event(&status, &task_id, result));
+                                last_status = Some(status);
+                                if terminal {
+                                    return;
+                                }
+                            }
+                        }
+                        PollOutcome::NotFound => {
+                            // Task vanished mid-stream — close.
+                            tracing::warn!(
+                                task_id = %task_id,
+                                "Task vanished during SSE stream; closing"
+                            );
+                            return;
+                        }
+                        PollOutcome::Error => {
+                            // Transient DB error — log and keep polling; the
+                            // next tick will retry.
+                        }
+                    }
+                }
+                _ = heartbeat_interval.tick() => {
+                    yield Ok(Event::default().data("heartbeat"));
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
+}
+
+// ============================================================================
 // Helpers (mirror routes/agent.rs — kept private to this module so we don't
 // touch any other file)
 // ============================================================================
+
+/// Outcome of a single status poll against the `tasks` table.
+enum PollOutcome {
+    /// The task row exists with this `status` and optional `result`.
+    Found {
+        status: String,
+        result: Option<serde_json::Value>,
+    },
+    /// The task row is gone (deleted or never existed).
+    NotFound,
+    /// A transient database error occurred.
+    Error,
+}
+
+/// Read the current `status` and `result` of a task by ID.
+///
+/// The query is **not** scoped by `tenant_id` — authentication / tenant
+/// isolation is expected to be enforced by the surrounding route middleware.
+fn poll_task_status(
+    db: &Pool<SqliteConnectionManager>,
+    task_id: &str,
+) -> PollOutcome {
+    let conn = match db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                task_id = %task_id,
+                "DB pool error in stream_task"
+            );
+            return PollOutcome::Error;
+        }
+    };
+
+    let row = conn.query_row(
+        "SELECT status, result FROM tasks WHERE id = ?1",
+        rusqlite::params![task_id],
+        |row| {
+            let status: String = row.get(0)?;
+            let result_str: Option<String> = row.get(1)?;
+            // Both columns are written by this module as valid JSON, so a
+            // parse failure indicates DB corruption — surface as null rather
+            // than crashing the stream.
+            let result: Option<serde_json::Value> = result_str
+                .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null));
+            Ok((status, result))
+        },
+    );
+
+    match row {
+        Ok((status, result)) => PollOutcome::Found { status, result },
+        Err(rusqlite::Error::QueryReturnedNoRows) => PollOutcome::NotFound,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                task_id = %task_id,
+                "DB query error in stream_task"
+            );
+            PollOutcome::Error
+        }
+    }
+}
+
+/// True for terminal task statuses — the stream should close after emitting.
+fn is_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// Build an SSE `Event` for a task status change.
+///
+/// The event name reflects the lifecycle stage; the data payload is always
+/// `{"task_id","status","result"}` (matching the J5 spec).
+fn task_event(
+    status: &str,
+    task_id: &str,
+    result: Option<serde_json::Value>,
+) -> Event {
+    let event_name = match status {
+        "queued" => "task_created",
+        "running" => "task_started",
+        "completed" => "task_completed",
+        "failed" => "task_failed",
+        "cancelled" => "task_cancelled",
+        _ => "task_status",
+    };
+    let payload = serde_json::json!({
+        "task_id": task_id,
+        "status": status,
+        "result": result,
+    });
+    Event::default().event(event_name).data(payload.to_string())
+}
 
 fn extract_token(
     headers: &axum::http::HeaderMap,
