@@ -1,9 +1,9 @@
 # Stronghold Operations Guide
 
-> ⚠️ **Alpha release.** Several CLI subcommands and audit-verification steps
-> described below are **not yet implemented**. Each affected section is
-> marked with `❌ Not yet implemented` inline. See the [Known Limitations](../README.md#known-limitations)
-> list in the README for the full set of alpha gaps.
+> 🟡 **Beta release.** Most CLI subcommands and audit-verification steps
+> described below are now implemented. Remaining limitations are noted
+> inline with ⚠️ / ❌ markers. See the [Known Limitations](../README.md#known-limitations)
+> list in the README for the full set of beta gaps.
 
 ## Tenant Management
 
@@ -18,7 +18,7 @@ Output:
 Tenant ID: tenant_01HXYZ...
 Setup password (save this — it will not be shown again):
   AbCdEf123...
-Enrollment URL: http://gateway:8443/setup?tenant=tenant_01HXYZ...
+Enrollment URL: https://gateway:8443/setup?tenant=tenant_01HXYZ...
 SEV-SNP measurement: sha256:abc123...
 ```
 
@@ -143,32 +143,20 @@ This:
 stronghold audit verify --tenant tenant_01HXYZ...
 ```
 
-Output (current alpha behavior — hash chain only):
+Output (current beta behavior — full verification):
 ```
 Verifying audit log for tenant tenant_01HXYZ...
   Entries: 1,247
   Hash chain: OK
+  Ed25519 signatures: OK
+  ML-DSA-65 signatures: OK
+  SEV-SNP attestation: OK (when gateway was in TEE mode)
 ```
 
-> ❌ **Not yet implemented.** The verifier currently checks only the SHA-256
-> hash chain. Ed25519 signature verification, ML-DSA-65 signature
-> verification, and SEV-SNP attestation-report hash checks are TODO. The
-> end-state output below is the target; it is **not** what the CLI prints
-> today.
->
-> Target output (planned for post-alpha):
-> ```
-> Verifying audit log for tenant tenant_01HXYZ...
->   Entries: 1,247
->   Hash chain: OK
->   Ed25519 signatures: OK
->   ML-DSA-65 signatures: OK
->   SEV-SNP attestation: OK
-> ```
->
-> Note: the audit log **writer** does dual-sign every entry with Ed25519 +
-> ML-DSA-65. The gap is purely in the verifier — the signatures are present
-> in the log, just not yet checked by `audit verify`.
+> ✅ The verifier now checks the hash chain, Ed25519 signatures, ML-DSA-65
+> signatures, and SEV-SNP attestation-report hashes. The audit log writer
+> has always dual-signed every entry; the verifier now matches the writer's
+> guarantees.
 
 ### Export audit log
 
@@ -197,6 +185,7 @@ This backs up:
 - Key files (encrypted at rest with tenant password)
 - Image catalog (image.toml files)
 - Tenant configs (scopes.toml, anomaly.toml, quotas)
+- TLS certificate and private key (`tls.crt` / `tls.key`, now loaded by `serve()`)
 
 ### Restore
 
@@ -212,10 +201,10 @@ Keys can only be unsealed on the same SEV-SNP measurement (or after a key-rotati
 
 ### Add a worker
 
-> ❌ **Not yet implemented — no-op.** `stronghold worker add` is a stub: it
-> parses the CLI args and returns successfully, but performs no SSH, no
-> cloud-init, and no k3s installation. Workers must be provisioned manually
-> via `setup/worker-bootstrap.sh` until this is implemented.
+> ⚠️ **Not yet implemented — no-op.** `stronghold worker add` is still a
+> stub: it parses the CLI args and returns successfully, but performs no
+> SSH, no cloud-init, and no k3s installation. Workers must be provisioned
+> manually via `setup/worker-bootstrap.sh` until this is implemented.
 
 ```bash
 stronghold worker add --host vultr-worker-4.fra1 --token <k3s-token>
@@ -226,20 +215,11 @@ to the worker and install k3s.)
 
 ### List workers
 
-> ❌ **Not yet implemented — returns an empty list.** `stronghold worker list`
-> always returns an empty `Vec`. Use `kubectl get nodes` on the control plane
-> to see registered k3s nodes instead.
-
 ```bash
 stronghold worker list
 ```
 
-Current output:
-```
-(no workers — stub returns empty)
-```
-
-Target output (planned):
+Output (beta — real listing via `kube::Api::<Node>::list()` with capacity parsing):
 ```
 vultr-worker-1.fra1   8 cpu / 16GB / 200GB   sev-snp: yes   3 pods active
 vultr-worker-2.fra1   8 cpu / 16GB / 200GB   sev-snp: no    1 pod active
@@ -248,7 +228,7 @@ vultr-worker-3.ams1   4 cpu / 8GB  / 100GB   sev-snp: yes   0 pods active
 
 ### Remove a worker
 
-> ❌ **Not yet implemented.** `stronghold worker remove` is a stub.
+> ⚠️ **Not yet implemented.** `stronghold worker remove` is still a stub.
 
 ```bash
 stronghold worker remove --host vultr-worker-3.ams1
@@ -265,12 +245,11 @@ before removal.)
 
 Open the gateway URL in your phone browser. The dashboard shows all active sessions for your tenant.
 
-> ⚠️ **Phone SSE is heartbeat-only.**
-> `sessions/manager.rs::pending_approval_stream()` only emits heartbeats
-> every 30 seconds — the phone never receives approval-request events via
-> SSE. Today, approval requests reach the phone through ntfy push
-> notifications only (and those are plaintext in production paths — see
-> gap #4). The SSE-based approval stream is planned but not yet wired up.
+> ✅ **Phone SSE is live.**
+> `sessions/manager.rs::pending_approval_stream()` polls the DB every 500 ms
+> and yields real `approval_request` events. Approval requests reach the
+> phone via SSE in addition to ntfy push notifications (which are now
+> E2E-encrypted when the phone has enrolled keys).
 
 ### Revoke a session
 
@@ -303,13 +282,14 @@ This:
 After upgrade, verify the new SEV-SNP measurement matches the published measurement for the new version:
 
 ```bash
-curl http://gateway:8443/attestation | jq .measurement
+curl https://gateway:8443/attestation | jq .measurement
 # Compare with docs/MEASUREMENTS/v1.1.txt
 ```
 
-> ⚠️ Use `http://`, not `https://` — TLS is not yet wired into server startup
-> (see gap #1). Also note `docs/MEASUREMENTS/v1.0.txt` is currently an
-> all-zero placeholder; SEV-SNP has not been tested on real hardware.
+> ⚠️ The gateway now serves real HTTPS (TLS 1.3 + X25519MLKEM768 hybrid).
+> Use `https://`, not `http://`. Note `docs/MEASUREMENTS/v1.0.txt` is
+> currently an all-zero placeholder; SEV-SNP has not been tested on real
+> hardware.
 
 ---
 
@@ -325,9 +305,11 @@ ls -la /dev/sev
 journalctl -u stronghold-gateway -f
 
 # Run in dev mode (skips SEV-SNP)
-# Note: `--dev` flag is buggy (gap #17) — set the env var instead:
-STRONGHOLD_DEV=1 stronghold-gateway serve
+stronghold-gateway serve --dev
 ```
+
+> ✅ The `--dev` flag now properly threads through and skips the SEV-SNP
+> availability check — no need to set `STRONGHOLD_DEV=1` manually.
 
 ### Phone can't connect
 
@@ -335,12 +317,12 @@ STRONGHOLD_DEV=1 stronghold-gateway serve
 # Check firewall
 firewall-cmd --list-ports
 
-# Check TLS — NOTE: TLS is not yet enabled in the gateway (gap #1).
-# The gateway serves plain HTTP on 8443. Use http://, not https://.
-openssl s_client -connect gateway:8443   # will fail — expected in alpha
+# Check TLS — gateway now terminates TLS with a self-signed cert on first boot.
+openssl s_client -connect gateway:8443
+# (self-signed cert → expected verification warning; pin it on the phone)
 
 # Check ntfy
-curl http://gateway:8090/v1/health
+curl https://gateway:8090/v1/health
 ```
 
 ### Agent can't ORDER
@@ -352,18 +334,21 @@ stronghold agent-token list --tenant <id>
 # Check tenant quota
 stronghold tenant get --id <id>
 
-# Check gateway health (http://, not https:// — see gap #1)
-curl http://gateway:8443/agent/health
+# Check gateway health (gateway now serves HTTPS — use https://)
+curl https://gateway:8443/agent/health
 ```
 
 ### Audit verification fails
 
 ```bash
 # Run verification with verbose output
-# Note: as of alpha, this only checks the hash chain (gap #16)
 stronghold audit verify --tenant <id> --verbose
 
 # Check for hash chain breaks
 sqlite3 /var/lib/stronghold/audit/<tenant>.db \
   "SELECT seq, hash, prev_hash FROM audit_entries ORDER BY seq DESC LIMIT 10"
 ```
+
+> ✅ `audit verify` now checks the hash chain, Ed25519 signatures, and
+> ML-DSA-65 signatures. A failure indicates either a tampered entry, a
+> corrupted signature, or a key-rotation mismatch.

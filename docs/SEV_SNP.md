@@ -1,12 +1,13 @@
 # SEV-SNP Attestation Guide
 
-> ⚠️ **Alpha status note.** The SEV-SNP code in `gateway/src/tee/` is
+> 🟡 **Beta status note.** The SEV-SNP code in `gateway/src/tee/` is
 > implemented and unit-tested on the dev box (which lacks `/dev/sev-guest`,
 > so the dev-fallback path is exercised). The full attestation flow has
-> **never been tested on real SEV-SNP hardware** — see gap #18. Treat the
-> SEV-SNP protection as unverified until golden integration tests run on
-> a real SEV-SNP box. Also note the `--dev` flag bug (gap #17) described in
-> [Development Without SEV-SNP](#development-without-sev-snp).
+> **never been tested on real SEV-SNP hardware** — see [Known Issues](#known-issues).
+> Treat the SEV-SNP protection as unverified until golden integration tests
+> run on a real SEV-SNP box. The `--dev` flag is now properly wired through
+> and skips the SEV-SNP availability check (no need to set `STRONGHOLD_DEV=1`
+> manually).
 
 ## Overview
 
@@ -19,7 +20,7 @@ Stronghold's gateway runs inside an AMD SEV-SNP (Secure Encrypted Virtualization
 
 ---
 
-## Implementation Status (Wave 7 / 0.9.0-alpha)
+## Implementation Status (0.10.0-beta)
 
 | Component | Status | Notes |
 |---|---|---|
@@ -29,10 +30,11 @@ Stronghold's gateway runs inside an AMD SEV-SNP (Secure Encrypted Virtualization
 | `tee/sev_snp.rs` — `seal_keys()` / `unseal_keys()` | ✅ Real (with dev fallback) | Uses `sev::firmware::guest::Firmware::get_derived_key()` with `GuestFieldSelect` bit 3 (measurement) on real hardware; falls back to HKDF-SHA256 from the measurement string + AES-256-GCM on dev |
 | `tee/sealing.rs` — HKDF + AES-GCM primitives | ✅ Real, hardware-independent | Shared module compiled under both feature flags; fully unit-tested on the dev box |
 | `tee/no_sev.rs` — non-TEE stub | ✅ Real stub | `sev_snp_active: false`, pass-through seal/unseal so the rest of the gateway runs without TEE |
-| `crypto/webauthn.rs` — challenge includes SEV-SNP measurement hash | ✅ Real | New `generate_challenge_with_sev_snp()` mixes the measurement hash into the SHA-256 challenge; phone signs it; verify fails on measurement change |
+| `crypto/webauthn.rs` — challenge includes SEV-SNP measurement hash | ✅ Real | `generate_challenge_with_sev_snp()` mixes the measurement hash into the SHA-256 challenge; phone signs it; verify fails on measurement change |
 | `routes/attestation.rs` — `/attestation` endpoint | ✅ Real | Returns `Json<AttestationReport>` from `generate_attestation_report()` |
+| `main.rs::serve()` — `--dev` flag | ✅ Real | Properly threads through and skips `verify_sev_snp_available()` at startup |
 | `docs/MEASUREMENTS/v1.0.txt` | 🚧 Placeholder | All-zero SHA-256 placeholder; replaced with the real measurement when built on SEV-SNP hardware |
-| Wave 7 DoD: "Gateway boots inside SEV-SNP guest on real Vultr SEV box" | ❌ Blocked on W7-T1 | Provisioning a Vultr SEV-SNP box cannot be done from this environment; deferred to ops |
+| SEV-SNP golden integration test on real Vultr SEV box | ❌ Blocked | Provisioning a Vultr SEV-SNP box cannot be done from this environment; deferred to ops |
 
 ### What "real" means here
 
@@ -52,9 +54,9 @@ When `/dev/sev-guest` is absent (dev box, non-SEV Vultr plan, CI), `Firmware::op
 
 ### What is still stubbed
 
-- **Measurement registry** (`docs/MEASUREMENTS/v1.0.txt`) — the file ships with an all-zero placeholder. The real measurement is only known after the gateway is built and first booted inside an SEV-SNP guest. W7-T1 (provision Vultr SEV box) is the blocker.
+- **Measurement registry** (`docs/MEASUREMENTS/v1.0.txt`) — the file ships with an all-zero placeholder. The real measurement is only known after the gateway is built and first booted inside an SEV-SNP guest. Provisioning a Vultr SEV-SNP box is the blocker.
 - **GPG-signed measurement file** — `v1.0.txt.sig` will be produced by the release process once the real measurement is captured.
-- **Phone-side attestation verification** (W7-T4) — the phone fetches `/attestation`, displays the measurement, and refuses enrollment on mismatch. This is wired into the enrollment HTML but the comparison logic against `docs/MEASUREMENTS/v1.0.txt` is implemented in the browser, not in this Rust crate.
+- **Phone-side attestation verification** — the phone fetches `/attestation`, displays the measurement, and refuses enrollment on mismatch. This is wired into the enrollment HTML but the comparison logic against `docs/MEASUREMENTS/v1.0.txt` is implemented in the browser, not in this Rust crate.
 
 ---
 
@@ -64,9 +66,9 @@ Without SEV-SNP, the Vultr hypervisor can read the gateway's memory at runtime �
 
 The audit log + WebAuthn + PQ crypto protect against:
 
-- Network adversaries ✅
+- Network adversaries ✅ (TLS 1.3 + X25519MLKEM768 hybrid now wired in)
 - Post-hoc quantum adversaries ✅
-- The Vultr hypervisor ❌ (without SEV-SNP)
+- The Vultr hypervisor ❌ (without SEV-SNP — hardware-blocked)
 
 SEV-SNP protects against the Vultr hypervisor.
 
@@ -74,7 +76,7 @@ SEV-SNP protects against the Vultr hypervisor.
 
 ## Provisioning a SEV-SNP Vultr Box
 
-> **W7-T1 (provision SEV-SNP Vultr box) cannot be completed from the development environment.** This section documents the procedure for ops.
+> **Provisioning a SEV-SNP Vultr box cannot be completed from the development environment.** This section documents the procedure for ops.
 
 1. Log in to the Vultr dashboard
 2. Create a new server
@@ -113,7 +115,7 @@ modprobe sev-guest
 
 When the gateway starts, it:
 
-1. Detects `/dev/sev-guest` via `verify_sev_snp_available()`
+1. Detects `/dev/sev-guest` via `verify_sev_snp_available()` (skipped when `--dev` is passed)
 2. Generates an attestation report via `sev::firmware::guest::Firmware::get_report(None, None, Some(1))`
 3. The report (`sev::firmware::guest::AttestationReport`, a `#[repr(C)]` struct) contains:
    - **`measurement`** (48 bytes) — SHA-384 digest of the binary + kernel + initrd + launch digest
@@ -238,15 +240,14 @@ If the keys are lost (e.g., the box is destroyed without backup):
 ### Verify the attestation
 
 ```bash
-# Fetch the attestation report
-# NOTE: use http://, not https:// — TLS is not wired into server startup (gap #1)
-curl http://gateway:8443/attestation | jq
+# Fetch the attestation report (gateway now serves HTTPS — use https://)
+curl -k https://gateway:8443/attestation | jq
 
 # Compare the measurement with the published value
-curl http://gateway:8443/attestation | jq -r .measurement
+curl -k https://gateway:8443/attestation | jq -r .measurement
 # Should match: docs/MEASUREMENTS/v1.0.txt
 # WARNING: docs/MEASUREMENTS/v1.0.txt is currently an all-zero placeholder.
-# SEV-SNP has never been tested on real hardware (gap #18).
+# SEV-SNP has never been tested on real hardware.
 ```
 
 ### Verify the audit log includes SEV-SNP reports
@@ -255,19 +256,18 @@ curl http://gateway:8443/attestation | jq -r .measurement
 stronghold audit verify --tenant <id>
 ```
 
-This checks (target behavior — see notes below):
+This checks:
 
-1. Hash chain is unbroken ✅ (implemented)
-2. Every Ed25519 signature verifies ❌ **TODO** (gap #16)
-3. Every ML-DSA-65 signature verifies ❌ **TODO** (gap #16)
-4. SEV-SNP attestation report hashes are present (when gateway was in TEE mode) ❌ **TODO**
-5. Attestation report hashes match the gateway's current measurement ❌ **TODO**
+1. ✅ Hash chain is unbroken
+2. ✅ Every Ed25519 signature verifies
+3. ✅ Every ML-DSA-65 signature verifies
+4. ✅ SEV-SNP attestation report hashes are present (when gateway was in TEE mode)
+5. ✅ Attestation report hashes match the gateway's current measurement
 
-> ⚠️ **Alpha status.** As of `0.9.0-alpha`, `stronghold audit verify` only
-> performs step 1 (hash chain check). Steps 2–5 are TODO. The audit log
-> **writer** does include SEV-SNP report hashes and dual Ed25519 + ML-DSA-65
-> signatures in every entry — the gap is purely in the verifier. See
-> [CRYPTO.md](CRYPTO.md#audit-signatures-ed25519--ml-dsa-65) and gap #16.
+> ✅ **Beta status.** `stronghold audit verify` now performs all five steps.
+> The audit log writer has always included SEV-SNP report hashes and dual
+> Ed25519 + ML-DSA-65 signatures in every entry; the verifier now matches
+> the writer's guarantees. See [CRYPTO.md](CRYPTO.md#audit-signatures-ed25519--ml-dsa-65).
 
 ---
 
@@ -294,39 +294,31 @@ cargo build --release --no-default-features --features no-sev-snp
 # (the sev-snp code is compiled but falls back to a stub at runtime
 # because /dev/sev-guest is absent)
 cargo build --release --features no-sev-snp
+
+# OR: run the gateway in dev mode (the --dev flag now properly skips
+# the SEV-SNP availability check — no need to set STRONGHOLD_DEV=1)
+stronghold-gateway serve --dev
 ```
 
-### ⚠️ The `--dev` flag bug (gap #17)
+### ✅ The `--dev` flag
 
-The `stronghold-gateway serve --dev` CLI flag is intended to bypass the
-SEV-SNP availability check at startup. However, **as of `0.9.0-alpha` it
-is buggy**: the flag sets a struct field on the parsed CLI args, but
-`main.rs::serve()` reads the `STRONGHOLD_DEV` **environment variable**
-instead:
+The `stronghold-gateway serve --dev` CLI flag properly bypasses the SEV-SNP
+availability check at startup. It is wired through to `main.rs::serve()`,
+which skips `tee::verify_sev_snp_available()` when the flag is set:
 
 ```rust,ignore
-// main.rs::serve() — the only check that actually gates SEV-SNP at startup:
-if !std::env::var("STRONGHOLD_DEV").is_ok() {
+// main.rs::serve()
+if !cli.dev && std::env::var("STRONGHOLD_DEV").is_err() {
     tee::verify_sev_snp_available()?;
 }
 ```
 
-The struct field set by `--dev` is never consulted. As a result, running
-`stronghold-gateway serve --dev` on a box without `/dev/sev-guest` will
-**still fail** at startup with `verify_sev_snp_available()` returning an
-error.
-
-**Workaround:** set the env var explicitly:
+The legacy `STRONGHOLD_DEV=1` env var still works as a fallback, but the
+`--dev` flag is the recommended way to run on boxes without `/dev/sev-guest`:
 
 ```bash
-STRONGHOLD_DEV=1 stronghold-gateway serve
-# or:
-export STRONGHOLD_DEV=1
-stronghold-gateway serve
+stronghold-gateway serve --dev
 ```
-
-This will be fixed when either (a) `serve()` is changed to read the struct
-field, or (b) the CLI flag also sets the env var. See gap #17.
 
 When running without SEV-SNP:
 
@@ -356,6 +348,19 @@ The `tee/sealing.rs` module contains the HKDF + AES-256-GCM key-sealing primitiv
 
 ---
 
+## Known Issues
+
+- **SEV-SNP on real hardware** — the dev box lacks `/dev/sev`. Code compiles,
+  key sealing tested with software keys, but the full attestation flow has
+  never run on real silicon. The measurement registry
+  (`docs/MEASUREMENTS/v1.0.txt`) is an all-zero placeholder until the
+  gateway is built and first booted inside an SEV-SNP guest. Hardware-blocked.
+- **Measurement registry placeholder** — `docs/MEASUREMENTS/v1.0.txt` is an
+  all-zero SHA-256 placeholder. The real measurement will be generated when
+  the gateway binary is first built and run inside an SEV-SNP guest.
+
+---
+
 ## Troubleshooting
 
 ### `/dev/sev-guest` not found
@@ -371,7 +376,9 @@ lsmod | grep sev
 modprobe sev-guest
 
 # If still not found, the Vultr plan does not support SEV-SNP
-# Either upgrade to a SEV-SNP plan or run with --features no-sev-snp
+# Either upgrade to a SEV-SNP plan, run with --features no-sev-snp,
+# or use --dev to skip the SEV-SNP check at startup
+stronghold-gateway serve --dev
 ```
 
 ### `/dev/sev` exists but `/dev/sev-guest` does not
@@ -418,7 +425,7 @@ Each file is signed with the Stronghold release GPG key. Verify the signature be
 gpg --verify docs/MEASUREMENTS/v1.0.txt.sig docs/MEASUREMENTS/v1.0.txt
 ```
 
-The `v1.0.txt` file currently contains an all-zero placeholder. The actual measurement will be generated when the gateway binary is first built and run inside an SEV-SNP guest (blocked on W7-T1 — provisioning a Vultr SEV-SNP box).
+The `v1.0.txt` file currently contains an all-zero placeholder. The actual measurement will be generated when the gateway binary is first built and run inside an SEV-SNP guest (blocked on provisioning a Vultr SEV-SNP box).
 
 ---
 

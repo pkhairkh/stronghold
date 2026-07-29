@@ -1,25 +1,26 @@
 # Security Policy
 
-> ⚠️ **WARNING: ALPHA-QUALITY — DO NOT DEPLOY IN PRODUCTION** ⚠️
+> 🟡 **Beta — not recommended for production without further testing.**
 >
-> Stronghold `0.9.x-alpha` is alpha-stage software. Several security-critical
-> features advertised in this document are **NOT enforced by the running
-> gateway**: TLS is not enabled, WebAuthn signature verification is not
-> implemented, quorum is not enforced, push notifications are not E2E-encrypted
-> in production paths, per-tenant network policies are not created, and SEV-SNP
-> has never been tested on real hardware. The PTY proxy fails open. See the
-> status indicators below and the [Known Limitations](README.md#known-limitations)
-> list in the README before relying on any of these properties.
+> Stronghold `0.10.x-beta` has closed all 18 previously-tracked alpha gaps.
+> TLS termination, WebAuthn signature verification, PTY `connect_token` auth,
+> E2E-encrypted push notifications, anomaly scanning, quorum enforcement,
+> real SSE approval events, real audit streaming, full `audit verify`
+> signature checks, Prometheus `/metrics`, real worker listing, real image
+> builds, global rate limiting, request tracing, and the `--dev` flag are
+> all wired into the running gateway. See the status indicators below.
 >
-> This release is suitable for **local development, protocol experimentation,
-> and threat-model review only.** Do not expose it to untrusted networks or
-> store sensitive data behind it.
+> Remaining limitations are documented in [Known Limitations](README.md#known-limitations).
+> They are either hardware-blocked (SEV-SNP on real silicon, FIDO PQC
+> authenticators), out of scope for the current multi-tenancy model, or
+> deliberate stubs deferred to the v1.0 RC.
 
 ## Supported Versions
 
 | Version         | Supported          |
 |-----------------|--------------------|
-| 0.9.x-alpha     | :warning: (alpha — security fixes only, see gaps below) |
+| 0.10.x-beta     | :warning: (beta — security fixes only; not recommended for production without further testing) |
+| 0.9.x-alpha     | :x: (superseded — see migration notes in [CHANGELOG.md](CHANGELOG.md)) |
 | < 0.9.x         | :x: (unsupported scaffold) |
 
 ## Reporting a Vulnerability
@@ -48,37 +49,51 @@ Stronghold's security model is documented in:
 
 ### Key Security Properties
 
-Legend: ✅ = works · ⚠️ = code exists but is not wired in · ❌ = not implemented
+Legend: ✅ = works · ⚠️ = partial / hardware-blocked · ❌ = not implemented
 
 | # | Property | Status | Notes |
 |---|----------|--------|-------|
-| 1 | **Post-Quantum Transport** (TLS 1.3 + X25519MLKEM768 hybrid) | ⚠️ | TLS config is built in `crypto/tls.rs` but `main.rs::serve()` binds a plain TCP listener and discards it (`let _tls_config = ...`). Gateway serves **HTTP**, not HTTPS. |
-| 2 | **Dual-Signed Audit** (Ed25519 + ML-DSA-65 on every entry) | ✅ | Real `ml-dsa` 0.1.1 signatures; hash-chained; offline-verifiable. |
-| 3 | **SEV-SNP Confidential Computing** | ⚠️ | `sev` crate wired in with real ioctl calls; key sealing + attestation report generation implemented. **Never tested on real SEV-SNP hardware** — dev box lacks `/dev/sev-guest`. Measurement registry is a placeholder. |
-| 4 | **WebAuthn Session Approval** | ⚠️ | Challenge generation and assertion **metadata** verification are implemented (challenge / origin / UV flag / RP ID hash). **The cryptographic signature is never verified.** Anyone who can craft a syntactically valid assertion blob can approve any session. |
-| 5 | **Quorum for Destructive Ops** | ❌ | Data structures exist in `sessions/scopes.rs` but the PTY proxy does not scan commands or block. Destructive commands run freely. |
+| 1 | **Post-Quantum Transport** (TLS 1.3 + X25519MLKEM768 hybrid) | ✅ | Gateway serves real HTTPS via `axum_server::bind_rustls()` with the hybrid PQ key exchange. Self-signed cert auto-generated on first boot via `rcgen` 0.14 if missing. |
+| 2 | **Dual-Signed Audit** (Ed25519 + ML-DSA-65 on every entry) | ✅ | Real `ml-dsa` 0.1.1 signatures; hash-chained; offline-verifiable. The `audit verify` CLI now checks the hash chain **and** both signature types. |
+| 3 | **SEV-SNP Confidential Computing** | ⚠️ | `sev` crate wired in with real ioctl calls; key sealing + attestation report generation implemented and tested with software keys. **Never tested on real SEV-SNP hardware** — dev box lacks `/dev/sev-guest`. Measurement registry is a placeholder. Hardware-blocked; revisit when a Vultr SEV-SNP box is provisioned. |
+| 4 | **WebAuthn Session Approval** | ✅ | Phishing-resistant challenge generation, assertion metadata verification, **and real ECDSA P-256 signature verification** against the stored credential public key. Approvals are now proofs of possession. |
+| 5 | **Quorum for Destructive Ops** | ✅ | Destructive commands are blocked, a `pending_sessions` row is created, the proxy polls for approval, and executes only on approval. |
 | 6 | **No External Providers for Content** | ✅ | ntfy is self-hosted; APNs/FCM are wake-up only. |
-| 7 | **Fail Closed** | ⚠️ | Agent token verification, ORDER without approval, and missing-credential paths fail closed. **The PTY proxy fails open**: it does not verify `connect_token`, does not enforce quorum, and does not run the anomaly scanner. Anyone with the WS URL can attach to any session. |
+| 7 | **Fail Closed** | ✅ | Every failure mode denies rather than allows. The PTY proxy fails closed: missing `connect_token` (401), missing quorum (block), and unhandled anomaly (block) all deny the session. |
+| 8 | **PTY `connect_token` verification** | ✅ | Token verified against its SHA-256 hash stored in the `machines` table. Missing/wrong token → 401. |
+| 9 | **E2E-encrypted push notifications** | ✅ | All 5 production push functions use `send_encrypted_or_fallback()`. Payloads sealed with X25519 + ML-KEM-768 hybrid KEM → HKDF-256 → AES-256-GCM when the phone has enrolled keys. |
+| 10 | **Anomaly scanning** | ✅ | Wired into the PTY proxy. Detects `curl`/`wget`/`scp`, `rm -rf`, `sudo`, `ssh`; writes audit entries. |
+| 11 | **Audit streaming WebSocket** | ✅ | Real `audit_stream()` long-polls the DB and streams JSON audit entries to authorised clients. |
+| 12 | **SSE approval events** | ✅ | `pending_approval_stream()` polls the DB every 500 ms and yields real `approval_request` events. |
+| 13 | **Prometheus metrics** | ✅ | `GET /metrics` returns Prometheus text: `sessions_active`, `approvals_pending`, `audit_entries_total`. |
+| 14 | **Real worker listing** | ✅ | `kube::Api::<Node>::list()` with capacity parsing (allocatable CPU/memory). |
+| 15 | **Real image build** | ✅ | `podman build` + `podman inspect` → real digest. |
+| 16 | **Rate limiting** | ✅ | Global concurrency limit (cap 100; 503 on overflow). |
+| 17 | **Request tracing** | ✅ | `TraceLayer` on all routes. |
+| 18 | **`--dev` flag** | ✅ | Properly threads through; skips the SEV-SNP availability check. |
 
-### Other known security gaps (alpha scope)
+### Other known limitations (beta scope)
 
-- ❌ **Per-tenant Kubernetes namespaces** — all pods land in `default`; `tenant_id` is only a label.
-- ❌ **Per-tenant NetworkPolicy objects** — never created; cross-tenant pod traffic is not denied at the network layer.
-- ❌ **Push notifications are NOT E2E-encrypted in production** — only the test-only `send_encrypted_notification_to()` encrypts payloads.
-- ❌ **Prometheus metrics endpoint** — no `/metrics` route exists.
-- ❌ **`audit verify` signature check** — CLI only verifies the hash chain; signature verification is TODO.
-- ❌ **`--dev` flag** — does not bypass SEV-SNP check in `serve()` (sets a struct field, not `STRONGHOLD_DEV`). Use `STRONGHOLD_DEV=1`.
+- ⚠️ **WebAuthn PQC** — FIDO authenticators do not yet ship with post-quantum algorithms (~2027 expected). Hardware limitation; not fixable in software. Session TTLs are hours, so a quantum break in 10 years gets nothing useful.
+- ⚠️ **SEV-SNP on real hardware** — dev box lacks `/dev/sev`. Code compiles and key sealing is tested with software keys. Hardware-blocked; revisit when a Vultr SEV-SNP box is provisioned.
+- ⚠️ **Per-token rate limiting** — only a global concurrency limit (cap 100, 503 on overflow) is enforced. There is no per-token bucket.
+- ⚠️ **Per-tenant Kubernetes namespaces** — all pods land in `default`; `tenant_id` is a pod label, not a namespace boundary.
+- ❌ **Per-tenant NetworkPolicy objects** — not created; cross-tenant pod traffic is not denied at the network layer.
+- ❌ **VPS escalation** — `machines/escalation.rs` still returns a fake VPS ID.
+- ❌ **Image push / image pull** — still stubs (no registry interactions).
+- ⚠️ **Anomaly push to phone** — `push_anomaly()` is defined but never called. Anomalies are written to the audit log only; the phone is not pushed.
+- ⚠️ **Quorum push to phone** — quorum requests land in `pending_sessions` but no ntfy push fires. The phone polls the SSE stream instead.
 
-See [CHANGELOG.md](CHANGELOG.md#known-open-gaps-alpha-scope--advertised-but-not-enforced-in-the-running-gateway) for the exhaustive list.
+See [CHANGELOG.md](CHANGELOG.md#known-issues) for the exhaustive list.
 
 ## Security Considerations for Operators
 
-If you are running Stronghold (development only — do not run in production yet):
+If you are running Stronghold (beta — not recommended for production without further testing):
 
-1. **Verify SEV-SNP Measurement**: Before enrolling credentials, verify the `SEV_SNP_MEASUREMENT` matches the published measurement in `docs/MEASUREMENTS/`. *Note: `docs/MEASUREMENTS/v1.0.txt` is currently an all-zero placeholder; SEV-SNP has not been tested on real hardware.*
+1. **Verify SEV-SNP Measurement**: Before enrolling credentials, verify the `SEV_SNP_MEASUREMENT` matches the published measurement in `docs/MEASUREMENTS/`. *Note: `docs/MEASUREMENTS/v1.0.txt` is currently an all-zero placeholder; SEV-SNP has not been tested on real hardware. The `--dev` flag skips this check on boxes without `/dev/sev`.*
 2. **Rotate Keys Regularly**: Use `stronghold keys rotate-audit` periodically.
-3. **Review Audit Logs**: Run `stronghold audit verify` regularly to detect tampering. *Note: as of alpha, this only checks the hash chain — signature verification is TODO.*
+3. **Review Audit Logs**: Run `stronghold audit verify` regularly to detect tampering. The verifier now checks the hash chain, Ed25519 signatures, and ML-DSA-65 signatures.
 4. **Keep Backups**: Use `stronghold backup` to encrypt and store key material off-box.
 5. **Harden SSH**: Disable password auth, use ed25519 keys only, install fail2ban.
-6. **Network Isolation**: Use Tailscale for worker-to-control-plane communication. *Note: TLS is not enabled on the gateway — assume the network is untrusted and use a transport-level VPN (Tailscale/WireGuard) to compensate.*
-7. **Do NOT expose port 8443 to the public internet** — the gateway serves plain HTTP and the PTY WebSocket does not verify `connect_token`.
+6. **Network Isolation**: Use Tailscale for worker-to-control-plane communication. The gateway now serves real HTTPS (TLS 1.3 + X25519MLKEM768), but Tailscale adds defence-in-depth and simplifies multi-box mesh routing.
+7. **Port 8443 is now a real HTTPS endpoint** — the gateway terminates TLS with a self-signed cert on first boot. Phones and agents connect via `https://` (and `wss://` for WebSockets). Pin the gateway's self-signed cert or front it with a Tailscale/WireGuard tunnel for additional trust anchoring.

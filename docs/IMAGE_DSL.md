@@ -1,10 +1,10 @@
 # Stronghold Image DSL
 
-> ⚠️ **Alpha status note.** The DSL parser and Containerfile generator are
-> fully implemented and tested. However, the `image build` subcommand only
-> **generates** the Containerfile — it does not invoke `podman`/`docker`
-> (gap #11). `image push` and `image pull` are stubs (gap #12). See
-> [Building](#building) below for details.
+> 🟡 **Beta status note.** The DSL parser, Containerfile generator, and the
+> actual image build are now all implemented and wired in. `image build`
+> invokes real `podman build` + `podman inspect` and returns a real digest.
+> `image push` and `image pull` are still stubs (deferred to the v1.0 RC).
+> See [Building](#building) below for details.
 
 ## Overview
 
@@ -226,34 +226,34 @@ snippets = [
 
 ## Building
 
-> ⚠️ **Alpha status.** `image build` only **generates** the Containerfile
-> from `image.toml` — it does NOT invoke `podman`, `docker`, or any other
-> build tool. The actual image build is a TODO (see gap #11). `image push`
-> and `image pull` are also stubs (gap #12) and do not contact any registry.
-> The DSL parser and Containerfile generator are fully implemented and tested.
+✅ **Beta status.** `image build` now invokes real `podman build` + `podman inspect` and returns a real digest. The DSL parser, Containerfile generator, and the actual build invocation are all implemented and tested. `image push` and `image pull` are still stubs (deferred to the v1.0 RC).
 
 ```bash
-# "Build" an image from image.toml — generates Containerfile only (gap #11)
+# Build an image from image.toml — real podman build, real digest returned
 stronghold image build images/rust-nightly/image.toml --tag stronghold/rust-nightly:2026.07
-# → writes ./Containerfile (or equivalent path); does NOT invoke podman/docker
+# → invokes `podman build -t stronghold/rust-nightly:2026.07 -f Containerfile .`
+# → runs `podman inspect` to capture the real image digest
+# → prints the digest (sha256:...) on success
 
 # List available images in the catalog (parses images/*/image.toml)
 stronghold image list
 
-# Push to registry — NOT YET IMPLEMENTED (gap #12), no-op stub
+# Push to registry — STILL A STUB (deferred to v1.0 RC)
 stronghold image push stronghold/rust-nightly:2026.07
 
-# Pull from registry — NOT YET IMPLEMENTED (gap #12), no-op stub
+# Pull from registry — STILL A STUB (deferred to v1.0 RC)
 stronghold image pull stronghold/rust-nightly:2026.07
 ```
 
-To actually build the generated Containerfile in the alpha release, invoke
-`podman` or `docker` manually:
+The build output includes the real image digest captured from `podman inspect`:
 
-```bash
-stronghold image build images/rust-nightly/image.toml --tag stronghold/rust-nightly:2026.07
-# then:
-podman build -t stronghold/rust-nightly:2026.07 -f Containerfile .
+```
+Building stronghold/rust-nightly:2026.07 from images/rust-nightly/image.toml
+  Generating Containerfile... done
+  Running `podman build -t stronghold/rust-nightly:2026.07 -f Containerfile .`... done
+  Inspecting image... done
+  Image digest: sha256:abc123def456...
+Build complete: stronghold/rust-nightly:2026.07 (sha256:abc123def456...)
 ```
 
 ---
