@@ -179,12 +179,8 @@ pub async fn get_task(
             // indicates DB corruption — surface it as a 500.
             let spec: serde_json::Value = serde_json::from_str(&spec_str)
                 .unwrap_or(serde_json::Value::Null);
-            let result: Option<serde_json::Value> = match result_str {
-                Some(s) => Some(
-                    serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
-                ),
-                None => None,
-            };
+            let result: Option<serde_json::Value> = result_str
+                .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null));
             Ok(GetTaskResponse {
                 id: row.get(0)?,
                 status: row.get(1)?,
