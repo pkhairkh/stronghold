@@ -127,7 +127,7 @@ pub async fn handle_pty_ws(
     }
 
     // --- Step 3: look up tenant_id for audit attribution. ---
-    let tenant_id: String = conn
+    let _tenant_id: String = conn
         .query_row(
             "SELECT tenant_id FROM machines WHERE id = ?1",
             rusqlite::params![machine_id],
