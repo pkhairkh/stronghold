@@ -89,8 +89,8 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
     let mut prev_hash = ZERO_HASH.to_string();
     let mut errors = Vec::new();
 
-    for (seq, ts, machine_id, event, payload, entry_prev_hash, hash, sig_ed, sig_mldsa, sev_hash) in
-        &entries
+    for (seq, ts, machine_id, event, payload, entry_prev_hash, hash, _sig_ed, _sig_mldsa, _sev_hash)
+        in &entries
     {
         // Check hash chain
         if *entry_prev_hash != prev_hash {
@@ -116,12 +116,49 @@ pub fn verify_tenant(tenant_id: &str) -> Result<()> {
             ));
         }
 
-        // TODO: verify Ed25519 signature
-        // TODO: verify ML-DSA-65 signature
         // TODO: verify SEV-SNP attestation report (if present)
 
         prev_hash = hash.clone();
-        let _ = (sig_ed, sig_mldsa, sev_hash);
+    }
+
+    // Load the audit keys and verify the dual signature (Ed25519 + ML-DSA-65)
+    // on every entry. If the keys can't be loaded (e.g. the keys directory
+    // doesn't exist or isn't writable), skip signature verification with a
+    // warning and report only the hash-chain results above.
+    match AuditKeys::load_or_generate_keys("/var/lib/stronghold/keys/") {
+        Ok(keys) => {
+            let mut sig_failures: Vec<i64> = Vec::new();
+            for (seq, ts, machine_id, event, payload, entry_prev_hash, _hash, sig_ed, sig_mldsa, _sev)
+                in &entries
+            {
+                let message = format!(
+                    "{}|{}|{}|{}|{}|{}",
+                    ts, tenant_id, machine_id, event, payload, entry_prev_hash
+                );
+                let sig = DualSignature {
+                    sig_ed25519: sig_ed.clone(),
+                    sig_mldsa65: sig_mldsa.clone(),
+                };
+                if !keys.verify(message.as_bytes(), &sig) {
+                    sig_failures.push(*seq);
+                }
+            }
+            if sig_failures.is_empty() {
+                println!("Ed25519 + ML-DSA-65 signatures: OK");
+            } else {
+                for seq in &sig_failures {
+                    println!("Ed25519 + ML-DSA-65 signatures: FAILED at seq {}", seq);
+                    errors.push(format!("seq {}: signature verification failed", seq));
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "WARNING: could not load audit keys from /var/lib/stronghold/keys/ ({}); \
+                 skipping Ed25519 + ML-DSA-65 signature verification",
+                e
+            );
+        }
     }
 
     if errors.is_empty() {
