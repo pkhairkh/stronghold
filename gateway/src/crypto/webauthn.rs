@@ -16,9 +16,12 @@
 use crate::routes::phone::WebAuthnAssertion;
 use anyhow::Result;
 use base64::Engine;
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::PublicKey;
 use rand::RngCore;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 /// The Relying Party (RP) ID for Stronghold. This must match the domain
@@ -233,15 +236,14 @@ pub fn parse_authenticator_data(
 /// 1. `client_data_json` parses and matches expected challenge + origin
 /// 2. `authenticator_data` parses and has `user_verified == true`
 /// 3. RP ID hash matches SHA-256 of the expected RP ID
-/// 4. (TODO W2-T7) Signature verifies against the registered credential public key
+/// 4. The ECDSA P-256 signature over `authenticator_data || SHA-256(client_data_json)`
+///    verifies against the credential's stored public key
 ///
-/// Returns `Ok(true)` only if all checks pass.
-///
-/// Note: full signature verification requires the credential's public key
-/// from the database (Wave 2, W2-T7). For now, this function validates
-/// everything except the signature. The signature check is a TODO.
+/// Returns `Ok(true)` only if all checks pass. Returns `Ok(false)` if any
+/// check fails (the caller treats this as an authentication failure).
+/// Returns `Err(_)` only on infrastructure failures (e.g. DB pool exhausted).
 pub fn verify_assertion(
-    _db: &Pool<SqliteConnectionManager>,
+    db: &Pool<SqliteConnectionManager>,
     tenant_id: &str,
     assertion: &WebAuthnAssertion,
     request_id: &str,
@@ -260,22 +262,19 @@ pub fn verify_assertion(
     let expected_challenge = generate_challenge("", request_id, "");
 
     // 1. Parse and validate client_data.
-    let _client_data = match parse_and_validate_client_data(
+    if let Err(e) = parse_and_validate_client_data(
         assertion,
         &expected_challenge,
         DEFAULT_RP_ORIGIN,
     ) {
-        Ok(cd) => cd,
-        Err(e) => {
-            tracing::warn!(
-                tenant = %tenant_id,
-                request = %request_id,
-                error = %e,
-                "WebAuthn client_data validation failed"
-            );
-            return Ok(false);
-        }
-    };
+        tracing::warn!(
+            tenant = %tenant_id,
+            request = %request_id,
+            error = %e,
+            "WebAuthn client_data validation failed"
+        );
+        return Ok(false);
+    }
 
     // 2. Parse authenticator_data.
     let auth_data = match parse_authenticator_data(assertion) {
@@ -319,16 +318,201 @@ pub fn verify_assertion(
         return Ok(false);
     }
 
-    // 5. TODO W2-T7: verify the signature against the credential public key.
-    //    This requires loading the credential from the DB (Wave 2).
-    //    For now, we accept the assertion if all other checks pass.
-    tracing::warn!(
+    // 5. Verify the ECDSA P-256 signature against the credential's public key.
+    //
+    // The signed message is `authenticator_data || SHA-256(client_data_json)`
+    // per the W3C WebAuthn specification (§6.1 "Verifying an Authentication
+    // Assertion", step 17). The signature is ASN.1 DER-encoded.
+    //
+    // Any failure in this stage (credential not found, malformed key/sig,
+    // bad signature) results in `Ok(false)` — never an `Err` — so that the
+    // caller treats it as a normal authentication rejection.
+    if !verify_assertion_signature(db, tenant_id, assertion) {
+        tracing::warn!(
+            tenant = %tenant_id,
+            request = %request_id,
+            credential = %assertion.credential_id,
+            "WebAuthn signature verification failed"
+        );
+        return Ok(false);
+    }
+
+    tracing::info!(
         tenant = %tenant_id,
         request = %request_id,
-        "WebAuthn signature verification not yet implemented — accepting based on metadata only (W2-T7 will fix this)"
+        credential = %assertion.credential_id,
+        "WebAuthn assertion verified — signature valid"
     );
 
     Ok(true)
+}
+
+/// Load the stored public key (base64/base64url-encoded SEC1 or SPKI bytes)
+/// for a credential from the database.
+///
+/// Returns `Ok(None)` if the credential is not found for this tenant or has
+/// been revoked. Returns `Ok(Some(_))` with the encoded public key string
+/// on success.
+fn load_credential_public_key(
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
+    credential_id: &str,
+) -> Result<Option<String>> {
+    let conn = db.get()?;
+    match conn.query_row(
+        "SELECT public_key FROM credentials
+         WHERE tenant_id = ?1
+           AND credential_id = ?2
+           AND revoked_at IS NULL",
+        params![tenant_id, credential_id],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(pk) => Ok(Some(pk)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Decode a base64-encoded string, accepting both base64url (no padding,
+/// as used throughout this gateway) and standard base64 (with padding, as
+/// sent by browsers via `btoa()`).
+///
+/// WebAuthn browsers historically send assertion fields as standard base64,
+/// but the rest of this gateway uses base64url. Accepting both makes the
+/// verifier robust to either encoding without weakening security.
+fn decode_b64_flexible(s: &str) -> Result<Vec<u8>> {
+    // Try base64url without padding first (the gateway's canonical encoding).
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s) {
+        return Ok(bytes);
+    }
+    // Fall back to standard base64 with padding (browser `btoa` output).
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s) {
+        return Ok(bytes);
+    }
+    // Last resort: base64url WITH padding.
+    base64::engine::general_purpose::URL_SAFE
+        .decode(s)
+        .map_err(|e| anyhow::anyhow!("failed to decode base64/base64url: {}", e))
+}
+
+/// Perform the cryptographic signature verification for a WebAuthn assertion.
+///
+/// Steps:
+/// 1. Load the credential's public key from the DB.
+/// 2. Decode the public key (SEC1 point or SPKI DER) into a `p256::PublicKey`.
+/// 3. Decode the assertion signature from base64, then parse as ASN.1 DER.
+/// 4. Reconstruct the signed message: `authenticator_data || SHA-256(client_data_json)`.
+/// 5. Verify the ECDSA P-256 signature.
+///
+/// Returns `true` only if every step succeeds and the signature is valid.
+fn verify_assertion_signature(
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
+    assertion: &WebAuthnAssertion,
+) -> bool {
+    // 1. Load the credential's stored public key.
+    let public_key_str = match load_credential_public_key(db, tenant_id, &assertion.credential_id)
+    {
+        Ok(Some(pk)) => pk,
+        Ok(None) => {
+            tracing::warn!(
+                tenant = %tenant_id,
+                credential = %assertion.credential_id,
+                "WebAuthn credential not found (or revoked) for tenant"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::error!(
+                tenant = %tenant_id,
+                credential = %assertion.credential_id,
+                error = %e,
+                "DB error while loading credential public key"
+            );
+            return false;
+        }
+    };
+
+    // 2. Decode the public key bytes and parse as a P-256 public key.
+    //
+    // The `public_key` field is stored during enrollment as the output of
+    // `navigator.credentials.create().response.getPublicKey()`, which is the
+    // SubjectPublicKeyInfo (SPKI) DER encoding of the EC P-256 key. We also
+    // accept the raw SEC1 point encoding (compressed or uncompressed) for
+    // robustness — `from_sec1_bytes` handles the SEC1 point, and
+    // `from_public_key_der` handles the SPKI wrapper.
+    let public_key_bytes = match decode_b64_flexible(&public_key_str) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to decode stored public key base64");
+            return false;
+        }
+    };
+
+    let public_key = match PublicKey::from_sec1_bytes(&public_key_bytes) {
+        Ok(pk) => pk,
+        Err(_) => {
+            // Not a raw SEC1 point — try SPKI DER (the browser's native format).
+            use p256::pkcs8::DecodePublicKey;
+            match PublicKey::from_public_key_der(&public_key_bytes) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        key_len = public_key_bytes.len(),
+                        "stored public key is neither a valid P-256 SEC1 point nor SPKI DER"
+                    );
+                    return false;
+                }
+            }
+        }
+    };
+
+    // 3. Decode and parse the signature (ASN.1 DER, as produced by WebAuthn
+    //    authenticators for ES256).
+    let signature_bytes = match decode_b64_flexible(&assertion.signature) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to decode assertion signature base64");
+            return false;
+        }
+    };
+
+    let signature = match Signature::from_der(&signature_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                sig_len = signature_bytes.len(),
+                "assertion signature is not valid DER-encoded ECDSA P-256"
+            );
+            return false;
+        }
+    };
+
+    // 4. Reconstruct the signed message: authenticator_data || SHA-256(client_data_json).
+    let auth_data_bytes = match decode_b64_flexible(&assertion.authenticator_data) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to decode authenticator_data base64");
+            return false;
+        }
+    };
+    let client_data_bytes = match decode_b64_flexible(&assertion.client_data_json) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to decode client_data_json base64");
+            return false;
+        }
+    };
+    let client_data_hash = Sha256::digest(&client_data_bytes);
+    let mut signed_message = Vec::with_capacity(auth_data_bytes.len() + client_data_hash.len());
+    signed_message.extend_from_slice(&auth_data_bytes);
+    signed_message.extend_from_slice(&client_data_hash);
+
+    // 5. Verify the ECDSA P-256 signature.
+    let verifying_key = VerifyingKey::from(&public_key);
+    verifying_key.verify(&signed_message, &signature).is_ok()
 }
 
 // ============================================================================
@@ -568,11 +752,13 @@ mod tests {
         assert!(auth_data.user_present());
     }
 
-    // --- W1-T8: full verify_assertion (without signature check) ---
+    // --- W1-T8: full verify_assertion (metadata + signature checks) ---
 
     #[test]
-    fn test_verify_assertion_accepts_valid_metadata() {
-        // Build a valid assertion with matching challenge, origin, RP ID hash, and UV flag.
+    fn test_verify_assertion_rejects_when_credential_missing() {
+        // Build a valid assertion with matching challenge, origin, RP ID hash,
+        // and UV flag — but no credential exists in the DB, so signature
+        // verification cannot succeed and the assertion must be rejected.
         let request_id = "req_01HXYZ";
         let challenge = generate_challenge("", request_id, "");
         let challenge_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge);
@@ -605,14 +791,15 @@ mod tests {
             signature: String::new(),
         };
 
-        // verify_assertion uses an in-memory DB pool. Create one for testing.
+        // An empty in-memory DB — no schema, no credentials table. The
+        // metadata checks all pass, but the signature stage cannot find a
+        // credential, so the assertion is rejected.
         let manager = r2d2_sqlite::SqliteConnectionManager::memory();
         let pool = r2d2::Pool::builder().build(manager).unwrap();
 
         let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
         assert!(result.is_ok());
-        // Returns true (metadata checks pass; signature check is TODO W2-T7).
-        assert!(result.unwrap());
+        assert!(!result.unwrap()); // rejected — no credential found
     }
 
     #[test]
@@ -690,6 +877,417 @@ mod tests {
         let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
         assert!(result.is_ok());
         assert!(!result.unwrap()); // rejected
+    }
+
+    // --- A2: ECDSA P-256 signature verification ---
+
+    /// Build the shared pieces of a valid WebAuthn assertion (client_data_json
+    /// + authenticator_data, both base64url-encoded) for the given request_id.
+    /// Returns `(client_data_bytes, client_data_b64, auth_bytes, auth_data_b64)`.
+    fn build_valid_assertion_metadata(
+        request_id: &str,
+    ) -> (Vec<u8>, String, Vec<u8>, String) {
+        let challenge = generate_challenge("", request_id, "");
+        let challenge_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge);
+        let client_data = serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": challenge_b64,
+            "origin": DEFAULT_RP_ORIGIN,
+        });
+        let client_data_bytes = serde_json::to_vec(&client_data).unwrap();
+        let client_data_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&client_data_bytes);
+
+        let rp_id_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(DEFAULT_RP_ID.as_bytes());
+            let result = hasher.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&result);
+            arr
+        };
+        let mut auth_bytes = Vec::new();
+        auth_bytes.extend_from_slice(&rp_id_hash);
+        auth_bytes.push(0x05); // UP=1, UV=1
+        auth_bytes.extend_from_slice(&0u32.to_be_bytes());
+        let auth_data_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&auth_bytes);
+
+        (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64)
+    }
+
+    /// Set up an in-memory DB pool (with full schema) containing one tenant
+    /// and one enrolled credential whose public key is derived from the
+    /// generated P-256 signing key.
+    ///
+    /// The public key is stored as base64url-encoded SEC1 bytes (the same
+    /// encoding the gateway uses internally). Returns `(pool, signing_key)`.
+    fn setup_db_with_credential(
+        credential_id: &str,
+    ) -> (
+        r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+        p256::ecdsa::SigningKey,
+    ) {
+        use p256::ecdsa::SigningKey;
+        use rand::rngs::OsRng;
+
+        let pool = crate::db::init_memory_pool().expect("failed to init in-memory DB");
+
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO tenants (id, name, created_at, setup_password, setup_used)
+             VALUES ('test-tenant', 'Test', datetime('now'), 'x', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Generate a P-256 keypair.
+        let mut rng = OsRng;
+        let signing_key = SigningKey::random(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.to_sec1_bytes();
+        let public_key_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&public_key_bytes);
+
+        conn.execute(
+            "INSERT INTO credentials
+             (id, tenant_id, credential_id, public_key, aaguid, transports, name, verified, created_at)
+             VALUES ('cred-1', 'test-tenant', ?1, ?2, '', '', 'Test', 1, datetime('now'))",
+            params![credential_id, public_key_b64],
+        )
+        .unwrap();
+        drop(conn);
+
+        (pool, signing_key)
+    }
+
+    /// Compute the WebAuthn signed message: `authenticator_data || SHA-256(client_data_json)`.
+    fn webauthn_signed_message(auth_bytes: &[u8], client_data_bytes: &[u8]) -> Vec<u8> {
+        let client_data_hash = Sha256::digest(client_data_bytes);
+        let mut msg = Vec::with_capacity(auth_bytes.len() + client_data_hash.len());
+        msg.extend_from_slice(auth_bytes);
+        msg.extend_from_slice(&client_data_hash);
+        msg
+    }
+
+    #[test]
+    fn test_verify_assertion_accepts_valid_signature() {
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_valid_sig";
+        let credential_id = "cred-valid";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        // Sign the WebAuthn message with the private key.
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(result.unwrap(), "valid signature must be accepted");
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_tampered_signature() {
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_tampered";
+        let credential_id = "cred-tampered";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let mut sig_bytes = signature.as_bytes().to_vec();
+
+        // Tamper: flip a bit in the middle of the signature.
+        let mid = sig_bytes.len() / 2;
+        sig_bytes[mid] ^= 0x01;
+        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&sig_bytes);
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "tampered signature must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_wrong_message_signature() {
+        // Sign a *different* message (wrong request_id) and present it as if
+        // it were for the target request. The signature is structurally valid
+        // DER, but it doesn't match `authenticator_data || SHA-256(client_data)`
+        // for this assertion, so it must be rejected.
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_target";
+        let credential_id = "cred-wrongmsg";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        // Sign over a different authenticator_data (flip the sign count).
+        let mut wrong_auth = auth_bytes.clone();
+        let last = wrong_auth.len() - 1;
+        wrong_auth[last] ^= 0x01;
+        let wrong_message = webauthn_signed_message(&wrong_auth, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&wrong_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "signature over the wrong message must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_revoked_credential() {
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_revoked";
+        let credential_id = "cred-revoked";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        // Revoke the credential after enrollment.
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE credentials SET revoked_at = datetime('now')
+                 WHERE credential_id = ?1",
+                params![credential_id],
+            )
+            .unwrap();
+        }
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "revoked credential must be rejected even with a valid signature"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_unknown_credential_id() {
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_unknown";
+        let credential_id_enrolled = "cred-enrolled";
+        let credential_id_asserted = "cred-different";
+        let (pool, signing_key) = setup_db_with_credential(credential_id_enrolled);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        // Present the assertion with a credential_id that doesn't match the
+        // enrolled one. The signature is valid, but it's for a credential the
+        // gateway doesn't know about.
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id_asserted.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "assertion for an unknown credential_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_accepts_valid_signature_spki_public_key() {
+        // The browser's `navigator.credentials.create().response.getPublicKey()`
+        // returns the key as a SubjectPublicKeyInfo (SPKI) DER blob, not as a
+        // raw SEC1 point. This test stores the public key in SPKI format and
+        // confirms `from_sec1_bytes()` can parse it.
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_spki";
+        let credential_id = "cred-spki";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        // Overwrite the stored public key with the SPKI encoding.
+        // The SPKI prefix for an uncompressed EC P-256 public key is 26 bytes:
+        //   SEQUENCE { SEQUENCE { OID ecPublicKey, OID secp256r1 }, BIT STRING <point> }
+        let verifying_key = signing_key.verifying_key();
+        let sec1_point = verifying_key.to_sec1_bytes(); // 65 bytes (uncompressed)
+        let spki_prefix: [u8; 26] = [
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+        let mut spki_bytes = Vec::with_capacity(spki_prefix.len() + sec1_point.len());
+        spki_bytes.extend_from_slice(&spki_prefix);
+        spki_bytes.extend_from_slice(&sec1_point);
+        let spki_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&spki_bytes);
+
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "UPDATE credentials SET public_key = ?1 WHERE credential_id = ?2",
+                params![spki_b64, credential_id],
+            )
+            .unwrap();
+        }
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "valid signature with SPKI-encoded public key must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_accepts_standard_base64_signature() {
+        // Browsers send the signature field as standard base64 (with `+/=`),
+        // via `btoa()`. The flexible decoder in the signature path must
+        // accept this encoding even though the rest of the gateway uses
+        // base64url. (The client_data_json and authenticator_data fields
+        // are parsed by the existing base64url-only parsers, so they must
+        // stay base64url; only the signature field uses standard base64 here.)
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_std_b64";
+        let credential_id = "cred-stdb64";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        // Encode the signature with STANDARD base64 (with padding) — simulating browser `btoa()`.
+        let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "standard base64-encoded signature must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_garbage_signature() {
+        // A completely invalid signature (not valid DER) must be rejected.
+        let request_id = "req_garbage";
+        let credential_id = "cred-garbage";
+        let (pool, _signing_key) = setup_db_with_credential(credential_id);
+        let (_client_data_bytes, client_data_b64, _auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not a real signature"),
+        };
+
+        let result = verify_assertion(&pool, "test-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(!result.unwrap(), "garbage signature must be rejected");
+    }
+
+    #[test]
+    fn test_verify_assertion_rejects_cross_tenant_credential() {
+        // A credential enrolled under tenant-A must not be usable by tenant-B.
+        use p256::ecdsa::{signature::Signer, DerSignature};
+
+        let request_id = "req_cross_tenant";
+        let credential_id = "cred-cross";
+        let (pool, signing_key) = setup_db_with_credential(credential_id);
+        let (client_data_bytes, client_data_b64, auth_bytes, auth_data_b64) =
+            build_valid_assertion_metadata(request_id);
+
+        let signed_message = webauthn_signed_message(&auth_bytes, &client_data_bytes);
+        let signature: DerSignature = signing_key.sign(&signed_message);
+        let signature_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.as_bytes());
+
+        let assertion = WebAuthnAssertion {
+            credential_id: credential_id.to_string(),
+            authenticator_data: auth_data_b64,
+            client_data_json: client_data_b64,
+            signature: signature_b64,
+        };
+
+        // Use a different tenant_id than the one the credential was enrolled under.
+        let result = verify_assertion(&pool, "other-tenant", &assertion, request_id);
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "credential from a different tenant must be rejected"
+        );
     }
 
     // --- W7-T5: SEV-SNP measurement binding in WebAuthn challenge ---
