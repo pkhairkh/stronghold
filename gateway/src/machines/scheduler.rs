@@ -63,6 +63,9 @@ pub async fn schedule(
     let cpu_req = format!("{}m", req.compute.cpu.unwrap_or(4) * 1000);
     let mem_req = format!("{}Gi", req.compute.memory_gb.unwrap_or(8));
 
+    // Fetch tenant credentials and inject as env vars
+    let env_vars = load_credential_env_vars(&state.db, tenant_id, &state.audit_keys);
+
     let pod: Pod = serde_json::from_value(serde_json::json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -89,6 +92,7 @@ pub async fn schedule(
                         "memory": &mem_req
                     }
                 },
+                "env": env_vars,
                 "volumeMounts": [
                     {"name": "work", "mountPath": "/home/dev/work"},
                     {"name": "cache", "mountPath": "/home/dev/.cache"}
@@ -291,19 +295,137 @@ pub async fn list_pods() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Load tenant credentials that have `env_var` set and return them as
+/// Kubernetes env var entries for pod injection.
+///
+/// Credentials are decrypted using the per-tenant key (derived from the
+/// audit Ed25519 key via HKDF). Only credentials with a non-null `env_var`
+/// are injected — file-mounted credentials (with `mount_path`) are skipped
+/// (they require a Secret + volume mount, which is a TODO).
+fn load_credential_env_vars(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    tenant_id: &str,
+    audit_keys: &crate::crypto::hybrid_sig::AuditKeys,
+) -> Vec<serde_json::Value> {
+    let conn = match db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "DB pool error loading credentials for pod injection");
+            return Vec::new();
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT name, encrypted_value, nonce, env_var FROM agent_credentials
+         WHERE tenant_id = ?1 AND env_var IS NOT NULL",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not query agent_credentials (table may not exist yet)");
+            return Vec::new();
+        }
+    };
+
+    let rows = match stmt.query_map(rusqlite::params![tenant_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,    // name
+            row.get::<_, Vec<u8>>(1)?,   // encrypted_value
+            row.get::<_, Vec<u8>>(2)?,   // nonce
+            row.get::<_, String>(3)?,    // env_var
+        ))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not fetch credential rows");
+            return Vec::new();
+        }
+    };
+
+    let tenant_key = crate::crypto::vault::derive_tenant_key(tenant_id, audit_keys);
+    let mut env_vars = Vec::new();
+
+    for row in rows {
+        let (name, encrypted, nonce, env_var) = match row {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "Error reading credential row");
+                continue;
+            }
+        };
+
+        let plaintext = match crate::crypto::vault::decrypt(&encrypted, &nonce, &tenant_key) {
+            Ok(p) => String::from_utf8_lossy(&p).to_string(),
+            Err(e) => {
+                tracing::warn!(error = %e, credential = %name, "Failed to decrypt credential for env injection");
+                continue;
+            }
+        };
+
+        tracing::debug!(
+            credential = %name,
+            env_var = %env_var,
+            "Injecting credential as env var"
+        );
+
+        env_vars.push(serde_json::json!({
+            "name": env_var,
+            "value": plaintext,
+        }));
+    }
+
+    if !env_vars.is_empty() {
+        tracing::info!(
+            tenant = tenant_id,
+            count = env_vars.len(),
+            "Injected {} credential env vars into pod spec",
+            env_vars.len()
+        );
+    }
+
+    env_vars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn test_get_kube_client() {
-        // This test requires k3s to be running on the dev box.
-        // It will be skipped in CI without k3s.
         let result = get_kube_client().await;
         if result.is_err() {
             eprintln!("Skipping k8s test: k3s not available");
             return;
         }
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_load_credential_env_vars_empty_when_no_credentials() {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let keys = crate::crypto::hybrid_sig::AuditKeys::generate();
+        let env_vars = load_credential_env_vars(&pool, "tenant_test", &keys);
+        assert!(env_vars.is_empty());
+    }
+
+    #[test]
+    fn test_load_credential_env_vars_injects_stored_credentials() {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let keys = crate::crypto::hybrid_sig::AuditKeys::generate();
+        let tenant_key = crate::crypto::vault::derive_tenant_key("tenant_test", &keys);
+
+        // Store a credential
+        let (ciphertext, nonce) = crate::crypto::vault::encrypt(b"ghp_secret_token", &tenant_key).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO agent_credentials (id, tenant_id, name, kind, encrypted_value, nonce, env_var, created_at)
+             VALUES ('cred_1', 'tenant_test', 'github-pat', 'api_token', ?1, ?2, 'GITHUB_TOKEN', datetime('now'))",
+            rusqlite::params![ciphertext, nonce],
+        ).unwrap();
+        drop(conn);
+
+        let env_vars = load_credential_env_vars(&pool, "tenant_test", &keys);
+        assert_eq!(env_vars.len(), 1);
+        assert_eq!(env_vars[0]["name"], "GITHUB_TOKEN");
+        assert_eq!(env_vars[0]["value"], "ghp_secret_token");
     }
 }
