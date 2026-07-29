@@ -49,7 +49,8 @@ pub fn build_server_config(
 pub fn generate_self_signed_cert(cn: &str) -> Result<(String, String)> {
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 
-    let mut params = CertificateParams::new(vec![cn.to_string()]);
+    let mut params = CertificateParams::new(vec![cn.to_string()])
+        .map_err(|e| anyhow::anyhow!("certificate params creation failed: {}", e))?;
     params.distinguished_name = DistinguishedName::new();
     params.distinguished_name.push(DnType::CommonName, cn);
 
