@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod agent;
 pub mod attestation;
+pub mod metrics;
 pub mod phone;
 pub mod pty;
 
@@ -67,6 +68,8 @@ pub fn build_router(
         .route("/setup", axum::routing::get(phone::setup_page))
         // Attestation
         .route("/attestation", axum::routing::get(attestation::get_report))
+        // Prometheus metrics
+        .route("/metrics", axum::routing::get(metrics::get_metrics))
         // Static files (phone enrollment PWA)
         .nest_service("/static", tower_http::services::ServeDir::new("../phone"))
         .with_state(state)
