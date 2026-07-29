@@ -327,17 +327,116 @@ pub async fn finalize_extend(
 }
 
 /// SSE stream of pending approval requests for a tenant.
+///
+/// Every 500ms, polls the `pending_sessions` table for rows with
+/// `status = 'pending'` and the given `tenant_id`. Sessions not previously
+/// yielded on this stream are emitted as `approval_request` SSE events with
+/// a JSON payload of:
+/// `{"request_id":"...","image":"...","ttl_secs":...,"reason":"...","created_at":"..."}`
+///
+/// A `heartbeat` data event is emitted every 30s as a keepalive between
+/// approval requests so the phone's watchdog (45s timeout) doesn't drop the
+/// connection during quiet periods.
 pub fn pending_approval_stream(
-    _db: &Pool<SqliteConnectionManager>,
-    _tenant_id: &str,
+    db: &Pool<SqliteConnectionManager>,
+    tenant_id: &str,
 ) -> impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
 {
-    // TODO: implement proper SSE stream pulling from pending_sessions table
+    use std::collections::HashSet;
+
+    // Clone into owned values so the returned stream is `'static` and not
+    // tied to the caller's borrowed references (the pool is cheaply cloneable
+    // — it's just an `Arc` around the shared connection pool).
+    let db = db.clone();
+    let tenant_id = tenant_id.to_string();
+
     async_stream::stream! {
-        // Placeholder: send a heartbeat every 30s
+        // Tracks session IDs already yielded on this stream so we only emit
+        // each pending request once per connection.
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+        // Delay (rather than burst) if a tick is missed while we were busy
+        // yielding approval_request events — keeps the cadence steady.
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Discard the immediate first tick so the first poll happens after
+        // 500ms and the first heartbeat after 30s.
+        poll_interval.tick().await;
+        heartbeat_interval.tick().await;
+
         loop {
-            yield Ok(axum::response::sse::Event::default().data("heartbeat"));
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::select! {
+                _ = poll_interval.tick() => {
+                    // Query pending_sessions for this tenant.
+                    //
+                    // Wrapped in a synchronous closure so all DB borrows are
+                    // released before we yield (the pooled connection is
+                    // returned to the pool once the closure exits).
+                    let rows_result = (|| -> anyhow::Result<Vec<(
+                        String,
+                        Option<String>,
+                        Option<i64>,
+                        Option<String>,
+                        String,
+                    )>> {
+                        let conn = db.get()?;
+                        let mut stmt = conn.prepare(
+                            "SELECT id, image, ttl_secs, reason, created_at
+                             FROM pending_sessions
+                             WHERE tenant_id = ?1 AND status = 'pending'",
+                        )?;
+                        let rows = stmt
+                            .query_map(params![&tenant_id], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, Option<String>>(1)?,
+                                    row.get::<_, Option<i64>>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                    row.get::<_, String>(4)?,
+                                ))
+                            })?
+                            .filter_map(|r| r.ok())
+                            .collect();
+                        Ok(rows)
+                    })();
+
+                    match rows_result {
+                        Ok(rows) => {
+                            for (id, image, ttl_secs, reason, created_at) in rows {
+                                // `insert` returns true if the id was NOT
+                                // already present — i.e. this is a new
+                                // pending request we haven't yielded yet.
+                                if seen.insert(id.clone()) {
+                                    let payload = serde_json::json!({
+                                        "request_id": id,
+                                        "image": image.unwrap_or_default(),
+                                        "ttl_secs": ttl_secs.unwrap_or(0),
+                                        "reason": reason.unwrap_or_default(),
+                                        "created_at": created_at,
+                                    });
+                                    yield Ok(axum::response::sse::Event::default()
+                                        .event("approval_request")
+                                        .data(payload.to_string()));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Transient DB error — log and keep the stream
+                            // alive; the next poll tick will retry.
+                            tracing::error!(
+                                error = %e,
+                                tenant = %tenant_id,
+                                "Failed to poll pending_sessions for SSE stream"
+                            );
+                        }
+                    }
+                }
+                _ = heartbeat_interval.tick() => {
+                    yield Ok(axum::response::sse::Event::default().data("heartbeat"));
+                }
+            }
         }
     }
 }
