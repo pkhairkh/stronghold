@@ -1,3 +1,4 @@
+#![allow(clippy::doc_overindented_list_items)]
 //! Credential vault CRUD endpoints + agent credential access.
 //!
 //! Implemented in: K2 (CRUD) + K3 (agent access)
@@ -125,7 +126,7 @@ pub struct AgentCredentialResponse {
 /// `POST /admin/credentials` — store an encrypted credential.
 ///
 /// Derives the per-tenant AES-256-GCM key from the audit Ed25519 secret key
-/// + `tenant_id`, encrypts `value`, and persists the ciphertext + nonce to
+/// and `tenant_id`, encrypts `value`, and persists the ciphertext + nonce to
 /// the `agent_credentials` table. The plaintext value is never stored or
 /// logged.
 pub async fn create_credential(

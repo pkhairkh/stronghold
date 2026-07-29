@@ -1,3 +1,4 @@
+#![allow(clippy::doc_overindented_list_items)]
 //! DAG executor — walks a workflow's directed acyclic graph and runs each
 //! step as a Task.
 //!
