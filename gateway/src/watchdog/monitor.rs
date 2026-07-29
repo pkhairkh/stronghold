@@ -46,7 +46,7 @@ async fn monitor_cycle(
         return Ok(());
     }
 
-    for (machine_id, _tenant_id, task_id, task_spec) in machines {
+    for (machine_id, _tenant_id, task_id_opt, task_spec_opt) in machines {
         // Fetch recent audit entries for this machine (last 5 minutes)
         let entries = get_recent_audit_entries(state, &machine_id, 5)?;
         if entries.is_empty() {
@@ -54,7 +54,9 @@ async fn monitor_cycle(
             continue;
         }
 
-        // Extract task keywords from the task spec
+        // task_spec is NULL when no running task is joined — fall back to empty.
+        let task_spec = task_spec_opt.unwrap_or_default();
+        let task_id = task_id_opt.unwrap_or_default();
         let keywords = extract_keywords(&task_spec);
 
         // Compute progress indicators
@@ -75,7 +77,7 @@ async fn monitor_cycle(
         store_watchdog_report(
             state,
             &machine_id,
-            task_id.as_deref(),
+            Some(task_id.as_str()),
             score.score,
             &progress,
             &warnings,
@@ -108,15 +110,15 @@ async fn monitor_cycle(
 
             if *count >= 3 && *current_level < 1 {
                 // Issue Level 1: Warning
-                issue_level(state, &machine_id, task_id.as_deref(), 1).await;
+                issue_level(state, &machine_id, Some(task_id.as_str()), 1).await;
                 *current_level = 1;
             } else if *count >= 5 && *current_level < 2 {
                 // Issue Level 2: Directive
-                issue_level(state, &machine_id, task_id.as_deref(), 2).await;
+                issue_level(state, &machine_id, Some(task_id.as_str()), 2).await;
                 *current_level = 2;
             } else if *count >= 7 && *current_level < 3 {
                 // Issue Level 3: Escalation
-                issue_level(state, &machine_id, task_id.as_deref(), 3).await;
+                issue_level(state, &machine_id, Some(task_id.as_str()), 3).await;
                 *current_level = 3;
             }
         } else {
@@ -137,7 +139,7 @@ async fn monitor_cycle(
 }
 
 /// Get all active machines with their current task.
-type MachineInfo = (String, String, Option<String>, String);
+type MachineInfo = (String, String, Option<String>, Option<String>);
 
 fn get_active_machines(
     state: &AppState,
@@ -154,7 +156,7 @@ fn get_active_machines(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(3)?,
         ))
     })?;
     let mut result = Vec::new();

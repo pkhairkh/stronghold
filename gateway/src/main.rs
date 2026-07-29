@@ -93,6 +93,16 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Install aws-lc-rs as the process-level CryptoProvider so that every
+    // rustls-backed client (reqwest, kube, oci-distribution) picks the same
+    // provider as the TLS server config in crypto::tls. Without this,
+    // reqwest::Client::new() panics with "Could not automatically determine
+    // the process-level CryptoProvider" the first time it tries to build a
+    // rustls client connector.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install aws-lc-rs CryptoProvider");
+
     let cli = Cli::parse();
 
     match cli.command {
