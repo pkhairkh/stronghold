@@ -153,18 +153,141 @@ async fn pty_proxy(socket: WebSocket, machine_id: String, token: String, state: 
             msg = ws_receiver.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
-                        if let Err(e) = pty.write_all(&data).await {
-                            tracing::error!(error = %e, "PTY write error");
-                            break;
+                        // Check for destructive commands before forwarding.
+                        let text = String::from_utf8_lossy(&data);
+                        if let Some(scope) = crate::sessions::scopes::matches_deceptive_pattern(
+                            &crate::sessions::scopes::ScopeConfig::default(),
+                            &text,
+                        ) {
+                            // Destructive command detected — require quorum.
+                            let _ = ws_sender.send(Message::Text(
+                                format!("⚠️ Destructive command detected (scope: {}). Waiting for quorum approval...\n", scope.name)
+                            )).await;
+
+                            // Write audit entry.
+                            let _ = crate::audit::log::entry(
+                                &state.db, &tenant_id, &machine_id,
+                                "quorum_requested",
+                                serde_json::json!({"cmd": &text[..text.len().min(200)], "scope": scope.name}),
+                                &state.audit_keys,
+                            );
+
+                            // Create a pending quorum request in the DB.
+                            let quorum_id = format!("quorum_{}", ulid::Ulid::new());
+                            let conn = match state.db.get() {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "DB pool error during quorum");
+                                    let _ = ws_sender.send(Message::Text("❌ Internal error.\n".into())).await;
+                                    continue;
+                                }
+                            };
+                            let _ = conn.execute(
+                                "INSERT INTO pending_sessions (id, tenant_id, machine_id, ttl_secs, reason, status, created_at, is_extend)
+                                 VALUES (?1, ?2, ?3, 60, ?4, 'pending', datetime('now'), 0)",
+                                rusqlite::params![quorum_id, &tenant_id, &machine_id, format!("quorum: {}", &text[..text.len().min(100)])],
+                            );
+
+                            // Poll for approval up to 60 seconds.
+                            let mut approved = false;
+                            for _ in 0..120 {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                let status: Option<String> = conn.query_row(
+                                    "SELECT status FROM pending_sessions WHERE id = ?1",
+                                    rusqlite::params![quorum_id],
+                                    |row| row.get(0),
+                                ).ok();
+                                match status.as_deref() {
+                                    Some("approved") => { approved = true; break; }
+                                    Some("denied") => break,
+                                    _ => {}
+                                }
+                            }
+
+                            if approved {
+                                let _ = ws_sender.send(Message::Text("✅ Quorum approved. Executing...\n".into())).await;
+                                if let Err(e) = pty.write_all(&data).await {
+                                    tracing::error!(error = %e, "PTY write error after quorum");
+                                    break;
+                                }
+                                log_cmd_exec(&state, &tenant_id, &machine_id, &data);
+                            } else {
+                                let _ = ws_sender.send(Message::Text("❌ Command denied by quorum (timeout or rejection).\n".into())).await;
+                                let _ = crate::audit::log::entry(
+                                    &state.db, &tenant_id, &machine_id,
+                                    "quorum_denied",
+                                    serde_json::json!({"cmd": &text[..text.len().min(200)]}),
+                                    &state.audit_keys,
+                                );
+                            }
+                        } else {
+                            // Non-destructive — forward immediately.
+                            if let Err(e) = pty.write_all(&data).await {
+                                tracing::error!(error = %e, "PTY write error");
+                                break;
+                            }
+                            log_cmd_exec(&state, &tenant_id, &machine_id, &data);
                         }
-                        log_cmd_exec(&state, &tenant_id, &machine_id, &data);
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = pty.write_all(text.as_bytes()).await {
-                            tracing::error!(error = %e, "PTY write error");
-                            break;
+                        let data = text.as_bytes();
+                        let text_str = String::from_utf8_lossy(data);
+                        if let Some(scope) = crate::sessions::scopes::matches_deceptive_pattern(
+                            &crate::sessions::scopes::ScopeConfig::default(),
+                            &text_str,
+                        ) {
+                            let _ = ws_sender.send(Message::Text(
+                                format!("⚠️ Destructive command detected (scope: {}). Waiting for quorum approval...\n", scope.name)
+                            )).await;
+
+                            let _ = crate::audit::log::entry(
+                                &state.db, &tenant_id, &machine_id,
+                                "quorum_requested",
+                                serde_json::json!({"cmd": &text_str[..text_str.len().min(200)], "scope": scope.name}),
+                                &state.audit_keys,
+                            );
+
+                            let quorum_id = format!("quorum_{}", ulid::Ulid::new());
+                            if let Ok(conn) = state.db.get() {
+                                let _ = conn.execute(
+                                    "INSERT INTO pending_sessions (id, tenant_id, machine_id, ttl_secs, reason, status, created_at, is_extend)
+                                     VALUES (?1, ?2, ?3, 60, ?4, 'pending', datetime('now'), 0)",
+                                    rusqlite::params![quorum_id, &tenant_id, &machine_id, format!("quorum: {}", &text_str[..text_str.len().min(100)])],
+                                );
+
+                                let mut approved = false;
+                                for _ in 0..120 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    let status: Option<String> = conn.query_row(
+                                        "SELECT status FROM pending_sessions WHERE id = ?1",
+                                        rusqlite::params![quorum_id],
+                                        |row| row.get(0),
+                                    ).ok();
+                                    match status.as_deref() {
+                                        Some("approved") => { approved = true; break; }
+                                        Some("denied") => break,
+                                        _ => {}
+                                    }
+                                }
+
+                                if approved {
+                                    let _ = ws_sender.send(Message::Text("✅ Quorum approved. Executing...\n".into())).await;
+                                    if let Err(e) = pty.write_all(data).await {
+                                        tracing::error!(error = %e, "PTY write error after quorum");
+                                        break;
+                                    }
+                                    log_cmd_exec(&state, &tenant_id, &machine_id, data);
+                                } else {
+                                    let _ = ws_sender.send(Message::Text("❌ Command denied by quorum.\n".into())).await;
+                                }
+                            }
+                        } else {
+                            if let Err(e) = pty.write_all(data).await {
+                                tracing::error!(error = %e, "PTY write error");
+                                break;
+                            }
+                            log_cmd_exec(&state, &tenant_id, &machine_id, data);
                         }
-                        log_cmd_exec(&state, &tenant_id, &machine_id, text.as_bytes());
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
