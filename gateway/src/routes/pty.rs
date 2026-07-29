@@ -16,7 +16,9 @@ use axum::extract::{
 };
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use rusqlite::params;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Query string parameters for the PTY WebSocket endpoint.
 ///
@@ -244,15 +246,207 @@ fn log_cmd_exec(
 }
 
 /// Read-only audit stream (for phone "WATCH LIVE" feature).
+///
+/// Streams `audit_entries` rows for `machine_id` to the connected phone
+/// over WebSocket.
+///
+/// 1. On connect, every existing entry for this machine is sent (oldest
+///    first) as a JSON object: `{"seq","ts","event","payload"}`.
+/// 2. The gateway then long-polls the `audit_entries` table every 500ms
+///    for rows with `seq > last_seen_seq AND machine_id = ?` and streams
+///    any new entries. This keeps end-to-end latency under 1 second.
+/// 3. A `"heartbeat"` keepalive message is sent every 30s during idle
+///    periods so intermediaries (proxies, the phone's watchdog) don't
+///    drop the connection.
+/// 4. The stream runs until the client closes the socket (the receive
+///    half yields `Close` or `None`).
+///
+/// The `payload` column is stored as a JSON-encoded TEXT string (see
+/// `audit::log::entry`); it is parsed back into a nested JSON value before
+/// being sent so each WebSocket message is a single, well-formed JSON
+/// object rather than a string-within-a-string.
 async fn audit_stream(socket: WebSocket, machine_id: String, _state: AppState) {
     tracing::info!(machine = %machine_id, "Audit stream WebSocket connected");
 
-    let (mut ws_sender, mut _ws_receiver) = socket.split();
+    let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // TODO: subscribe to audit events for this machine_id and stream to client
-    let _ = ws_sender
-        .send(Message::Text(
-            "Audit stream not yet implemented".to_string(),
-        ))
-        .await;
+    // Fetch audit entries for `machine_id` whose `seq` is strictly greater
+    // than `min_seq`, ordered oldest-first. Returns `(seq, ts, event,
+    // payload)` tuples with the payload parsed back into a JSON value.
+    //
+    // Passing `min_seq = 0` fetches the entire backlog (SQLite
+    // AUTOINCREMENT starts at 1). (Plain `//` rather than `///` because
+    // rustdoc comments have no meaning on a closure/let binding — they'd
+    // trigger an `unused_doc_comment` warning.)
+    let fetch_entries = |min_seq: i64| -> anyhow::Result<Vec<(i64, String, String, serde_json::Value)>> {
+        let conn = _state.db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, event, payload
+             FROM audit_entries
+             WHERE machine_id = ?1 AND seq > ?2
+             ORDER BY seq ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![&machine_id, min_seq], |row| {
+                let seq: i64 = row.get(0)?;
+                let ts: String = row.get(1)?;
+                let event: String = row.get(2)?;
+                let payload: Option<String> = row.get(3)?;
+                Ok((seq, ts, event, payload))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(seq, ts, event, payload)| {
+                // `payload` is written by `audit::log::entry` as
+                // `payload.to_string()`, so it is valid JSON. Parse it back
+                // so the WebSocket message nests the payload as a real JSON
+                // object/array. Fall back to a JSON string (or null) so no
+                // data is lost if a row was written by older code.
+                let payload_value = match payload {
+                    Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+                        .unwrap_or(serde_json::Value::String(s)),
+                    None => serde_json::Value::Null,
+                };
+                (seq, ts, event, payload_value)
+            })
+            .collect();
+        Ok(rows)
+    };
+
+    // Helper to serialize + send one entry. Returns `false` if the send
+    // failed (client gone) so the caller can bail out.
+    async fn send_entry(
+        ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        seq: i64,
+        ts: String,
+        event: String,
+        payload: serde_json::Value,
+    ) -> bool {
+        let msg = serde_json::json!({
+            "seq": seq,
+            "ts": ts,
+            "event": event,
+            "payload": payload,
+        });
+        ws_sender
+            .send(Message::Text(msg.to_string()))
+            .await
+            .is_ok()
+    }
+
+    // Last seq number we have already streamed. Starts at 0 so the first
+    // fetch returns the entire backlog (seq starts at 1 under AUTOINCREMENT).
+    let mut last_seen_seq: i64 = 0;
+
+    // --- Step 1: send the existing backlog on connect. ---
+    match fetch_entries(last_seen_seq) {
+        Ok(rows) => {
+            for (seq, ts, event, payload) in rows {
+                last_seen_seq = seq.max(last_seen_seq);
+                if !send_entry(&mut ws_sender, seq, ts, event, payload).await {
+                    tracing::info!(
+                        machine = %machine_id,
+                        "Audit stream WebSocket send failed during backlog; closing"
+                    );
+                    return;
+                }
+            }
+            tracing::debug!(
+                machine = %machine_id,
+                last_seq = last_seen_seq,
+                "Audit stream backlog sent"
+            );
+        }
+        Err(e) => {
+            // Transient DB error — log and continue into the poll loop;
+            // the next tick will retry. Don't kill the socket over a
+            // single failed read.
+            tracing::error!(
+                error = %e,
+                machine = %machine_id,
+                "Initial audit_entries fetch failed"
+            );
+        }
+    }
+
+    // --- Steps 2–7: long-poll loop with heartbeat + disconnect detection. ---
+    let mut poll_interval = tokio::time::interval(Duration::from_millis(500));
+    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+    // Delay (rather than burst) if a tick was missed while we were busy
+    // sending backlog/entries — keeps the cadence steady.
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Discard the immediate first tick so the first new-entry poll happens
+    // after 500ms and the first heartbeat after 30s (the backlog was already
+    // sent synchronously above).
+    poll_interval.tick().await;
+    heartbeat_interval.tick().await;
+
+    loop {
+        tokio::select! {
+            // Client disconnect detection. This is a read-only stream, so
+            // the only client message we care about is Close; anything else
+            // (Pings are auto-answered by axum) is ignored.
+            msg = ws_receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::info!(
+                            machine = %machine_id,
+                            "Audit stream WebSocket closed by client"
+                        );
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        tracing::debug!(
+                            error = %e,
+                            machine = %machine_id,
+                            "Audit stream recv error; closing"
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            // Long-poll for new entries every 500ms.
+            _ = poll_interval.tick() => {
+                match fetch_entries(last_seen_seq) {
+                    Ok(rows) => {
+                        for (seq, ts, event, payload) in rows {
+                            last_seen_seq = seq.max(last_seen_seq);
+                            if !send_entry(&mut ws_sender, seq, ts, event, payload).await {
+                                tracing::info!(
+                                    machine = %machine_id,
+                                    "Audit stream WebSocket send failed during poll; closing"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Transient DB error — log and keep the stream
+                        // alive; the next poll tick will retry.
+                        tracing::error!(
+                            error = %e,
+                            machine = %machine_id,
+                            "Audit poll fetch failed"
+                        );
+                    }
+                }
+            }
+            // Keepalive heartbeat every 30s. Sent unconditionally — an
+            // occasional extra heartbeat right after an entry is harmless,
+            // and during idle periods this satisfies the 30s keepalive
+            // requirement.
+            _ = heartbeat_interval.tick() => {
+                if ws_sender.send(Message::Text("heartbeat".to_string())).await.is_err() {
+                    tracing::info!(
+                        machine = %machine_id,
+                        "Audit stream heartbeat send failed; closing"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    tracing::info!(machine = %machine_id, "Audit stream WebSocket closed");
 }
