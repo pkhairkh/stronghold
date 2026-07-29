@@ -46,6 +46,7 @@ rand_core = { workspace = true }
 ml-dsa = { workspace = true }
 ml-kem = { workspace = true }
 kem = { workspace = true }
+rcgen = { workspace = true }
 reqwest = { workspace = true }
 portable-pty = { workspace = true }
 tracing = { workspace = true }

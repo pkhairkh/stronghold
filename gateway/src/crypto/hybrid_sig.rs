@@ -3,13 +3,13 @@
 //! Every audit entry is signed with both algorithms. If either is broken
 //! in the future, the other still proves authenticity.
 //!
-//! Implemented in: W1-T1, W1-T2 (Ed25519 fully implemented + tested)
-//!                 W1-T3 (ML-DSA-65 deferred — see TODO below)
+//! Implemented in: W1-T1, W1-T2 (Ed25519), Gap-1 (ML-DSA-65)
 //! Tested by: gateway/src/crypto/hybrid_sig.rs (unit + property tests)
 
 use anyhow::{Context, Result};
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey, Verifier};
+use ml_dsa::{Generate, Keypair, KeyExport, MlDsa65, SigningKey as MlDsaSigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -20,22 +20,25 @@ const ED25519_SECRET_LEN: usize = 32;
 const ED25519_PUBLIC_LEN: usize = 32;
 /// Ed25519 signature is 64 bytes.
 const ED25519_SIG_LEN: usize = 64;
+/// ML-DSA-65 secret key is 4032 bytes.
+const MLDSA_SECRET_LEN: usize = 4032;
+/// ML-DSA-65 public key is 1952 bytes.
+const MLDSA_PUBLIC_LEN: usize = 1952;
+/// ML-DSA-65 signature is 3309 bytes.
+const MLDSA_SIG_LEN: usize = 3309;
 
 /// A hybrid signature keypair (Ed25519 + ML-DSA-65).
 ///
-/// - Ed25519: fully implemented (W1-T1, W1-T2)
-/// - ML-DSA-65: stub (W1-T3 deferred — `ml-dsa` crate API not yet stable)
-///
-/// The ML-DSA-65 fields are kept as `Vec<u8>` so the type signature doesn't
-/// change when W1-T3 lands. For now `sign()` produces an empty ML-DSA
-/// signature and `verify()` skips ML-DSA verification (with a logged warning).
+/// Both algorithms are fully implemented and tested. The audit log is
+/// dual-signed: if either algorithm is broken in the future, the other
+/// still proves authenticity.
 #[derive(Clone)]
 pub struct AuditKeys {
     pub ed25519_secret: SigningKey,
     pub ed25519_public: ed25519_dalek::VerifyingKey,
-    /// ML-DSA-65 secret key (stub: zero-filled until W1-T3).
+    /// ML-DSA-65 signing key (serialized as raw bytes for storage).
     pub mldsa_secret: Vec<u8>,
-    /// ML-DSA-65 public key (stub: zero-filled until W1-T3).
+    /// ML-DSA-65 verifying key (serialized as raw bytes for storage).
     pub mldsa_public: Vec<u8>,
 }
 
@@ -43,9 +46,9 @@ impl std::fmt::Debug for AuditKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuditKeys")
             .field("ed25519_public", &hex::encode(self.ed25519_public.to_bytes()))
-            .field("mldsa_public", &"[redacted-stub]")
+            .field("mldsa_public_len", &self.mldsa_public.len())
             .field("ed25519_secret", &"[redacted]")
-            .field("mldsa_secret", &"[redacted-stub]")
+            .field("mldsa_secret", &"[redacted]")
             .finish()
     }
 }
@@ -66,18 +69,19 @@ pub struct DualSignature {
 impl AuditKeys {
     /// Generate a new hybrid keypair.
     ///
-    /// Ed25519 uses `OsRng` (platform CSPRNG). ML-DSA-65 is currently a
-    /// zero-filled stub pending W1-T3.
+    /// Ed25519 uses `OsRng` (platform CSPRNG).
+    /// ML-DSA-65 uses the `ml_dsa` crate's `Generate::generate()`.
     #[allow(clippy::needless_borrows_for_generic_args)] // false positive: generate() takes &mut R
     pub fn generate() -> Self {
         let mut rng = rand::rngs::OsRng;
         let ed25519_secret = SigningKey::generate(&mut rng);
         let ed25519_public = ed25519_secret.verifying_key();
 
-        // TODO W1-T3: generate real ML-DSA-65 keypair using ml_dsa crate.
-        // For now, zero-filled placeholders so the struct shape is stable.
-        let mldsa_secret = vec![0u8; 32];
-        let mldsa_public = vec![0u8; 1952];
+        // ML-DSA-65 keypair generation
+        let mldsa_sk = MlDsaSigningKey::<MlDsa65>::generate();
+        let mldsa_vk = mldsa_sk.verifying_key();
+        let mldsa_secret = mldsa_sk.to_bytes().to_vec();
+        let mldsa_public = mldsa_vk.to_bytes().to_vec();
 
         Self {
             ed25519_secret,
@@ -194,15 +198,14 @@ impl AuditKeys {
     /// Sign a message with both algorithms.
     ///
     /// Returns a `DualSignature` with base64-encoded signatures.
-    /// Ed25519 is real; ML-DSA-65 is an empty signature until W1-T3.
+    /// Both Ed25519 and ML-DSA-65 signatures are real.
     pub fn sign(&self, message: &[u8]) -> DualSignature {
         // Ed25519
         let ed_sig = self.ed25519_secret.sign(message);
         let sig_ed25519 = base64::engine::general_purpose::STANDARD.encode(ed_sig.to_bytes());
 
-        // ML-DSA-65: stub — empty signature.
-        // TODO W1-T3: use ml_dsa::SigningKey::sign
-        let sig_mldsa65 = String::new();
+        // ML-DSA-65
+        let sig_mldsa65 = self.sign_mldsa65(message);
 
         DualSignature {
             sig_ed25519,
@@ -210,11 +213,36 @@ impl AuditKeys {
         }
     }
 
+    /// Sign a message with ML-DSA-65 only (internal helper).
+    fn sign_mldsa65(&self, message: &[u8]) -> String {
+        if self.mldsa_secret.len() != MLDSA_SECRET_LEN {
+            tracing::warn!(
+                "ML-DSA-65 secret key is wrong size ({}), expected {} — skipping ML-DSA signature",
+                self.mldsa_secret.len(),
+                MLDSA_SECRET_LEN
+            );
+            return String::new();
+        }
+        let mut sk_bytes = [0u8; MLDSA_SECRET_LEN];
+        sk_bytes.copy_from_slice(&self.mldsa_secret);
+        let sk = match MlDsaSigningKey::<MlDsa65>::from_bytes(&sk_bytes) {
+            Ok(sk) => sk,
+            Err(e) => {
+                tracing::warn!("ML-DSA-65 key deserialization failed: {:?} — skipping", e);
+                return String::new();
+            }
+        };
+        use ml_dsa::Signer;
+        let sig = sk.sign(message);
+        let sig_bytes = sig.encode();
+        base64::engine::general_purpose::STANDARD.encode(sig_bytes.as_slice())
+    }
+
     /// Verify a dual signature.
     ///
     /// Returns `true` only if BOTH signatures verify (when both are present).
-    /// Ed25519 is always verified. ML-DSA-65 verification is skipped if the
-    /// signature is empty (stub mode) — this is logged at `debug` level.
+    /// Ed25519 is always verified. ML-DSA-65 is verified when the signature
+    /// is non-empty; if empty (legacy/stub entries), only Ed25519 is checked.
     pub fn verify(&self, message: &[u8], sig: &DualSignature) -> bool {
         // Ed25519
         let ed_sig_bytes = match base64::engine::general_purpose::STANDARD.decode(&sig.sig_ed25519)
@@ -233,17 +261,52 @@ impl AuditKeys {
             return false;
         }
 
-        // ML-DSA-65: stub — skip if empty, fail if non-empty (we can't verify
-        // something we can't produce yet).
-        // TODO W1-T3: use ml_dsa::VerifyingKey::verify
-        if !sig.sig_mldsa65.is_empty() {
-            tracing::warn!(
-                "ML-DSA-65 signature present but verification not implemented — rejecting"
-            );
+        // ML-DSA-65: verify if signature is present, skip if empty (legacy entries).
+        if sig.sig_mldsa65.is_empty() {
+            // Legacy entry (pre-ML-DSA-65) — Ed25519-only verification passed.
+            return true;
+        }
+
+        if !self.verify_mldsa65(message, &sig.sig_mldsa65) {
+            tracing::warn!("ML-DSA-65 signature verification failed");
             return false;
         }
 
         true
+    }
+
+    /// Verify an ML-DSA-65 signature (internal helper).
+    fn verify_mldsa65(&self, message: &[u8], sig_b64: &str) -> bool {
+        if self.mldsa_public.len() != MLDSA_PUBLIC_LEN {
+            return false;
+        }
+        let sig_bytes = match base64::engine::general_purpose::STANDARD.decode(sig_b64) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        if sig_bytes.len() != MLDSA_SIG_LEN {
+            return false;
+        }
+
+        let mut vk_bytes = [0u8; MLDSA_PUBLIC_LEN];
+        vk_bytes.copy_from_slice(&self.mldsa_public);
+        let vk = match ml_dsa::VerifyingKey::<MlDsa65>::from_bytes(&vk_bytes) {
+            Ok(vk) => vk,
+            Err(_) => return false,
+        };
+
+        // Decode signature
+        let mut sig_arr = [0u8; MLDSA_SIG_LEN];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig = match ml_dsa::Signature::<MlDsa65>::decode(&ml_dsa::param::EncodedSignature::<
+            MlDsa65,
+        >::from(&sig_arr)) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        use ml_dsa::Verifier;
+        vk.verify(message, &sig).is_ok()
     }
 
     /// Get the public key fingerprints (SHA-256 hex), for phone verification.

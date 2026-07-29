@@ -56,11 +56,14 @@ rand = "0.8"
 rand_core = "0.6"
 
 # Cryptography — post-quantum (FIPS 203/204)
-ml-dsa = "0.0.4"
+ml-dsa = "0.1"
 # Pin ml-kem and kem to compatible versions (ml-kem 0.2.x needs kem 0.3.0-pre).
 ml-kem = { version = "=0.2.1", features = ["deterministic"] }
 kem = "=0.3.0-pre.0"
 # Note: pqc-kyber is pulled in via rustls feature flag
+
+# X.509 certificate generation (for self-signed TLS certs)
+rcgen = "0.14"
 
 # HTTP client (for ntfy, Vultr API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
