@@ -393,7 +393,7 @@ pub async fn submit_result(
     headers: axum::http::HeaderMap,
     Path(task_id): Path<String>,
     Json(req): Json<SubmitResultRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<(StatusCode, axum::Json<serde_json::Value>), (StatusCode, String)> {
     let agent_token = extract_token(&headers)?;
     let tenant_id = authenticate_agent(&state, &agent_token)?;
 
@@ -467,7 +467,88 @@ pub async fn submit_result(
         "Task result submitted"
     );
 
-    Ok(StatusCode::OK)
+    // AUTO-CREATE NEXT TASK: The orchestrator immediately creates the next
+    // blueprint task so the agent can continue working without stopping.
+    // This prevents the agent from emitting EOS — there is ALWAYS more work.
+    let next_instruction: Option<serde_json::Value> = if status == "completed" {
+        // Determine the blueprint phase of the completed task
+        let task_spec: Option<String> = {
+            let conn = match state.db.get() {
+                Ok(c) => c,
+                Err(_) => return Ok((StatusCode::OK, axum::Json(serde_json::json!({"status": "ok", "next_work": null})))),
+            };
+            conn.query_row(
+                "SELECT spec FROM tasks WHERE id = ?1",
+                rusqlite::params![task_id],
+                |row| row.get::<_, String>(0),
+            ).ok()
+        };
+
+        if let Some(spec_str) = task_spec {
+            if let Ok(spec) = serde_json::from_str::<serde_json::Value>(&spec_str) {
+                if let Some(phase) = spec.get("blueprint_phase").and_then(|v| v.as_str()) {
+                    // Find the next phase in the pipeline
+                    const PIPELINE: &[&str] = &["problem_catalog", "rough_draft", "adrs", "fine_draft", "spec", "tasks", "progress"];
+                    const INSTRUCTIONS: &[&str] = &[
+                        "Create docs/blueprint/01-problem-catalog.md. Read the repo, identify all problems, stakeholders, constraints.",
+                        "Create docs/blueprint/02-rough-draft.md. For EACH problem, propose a solution + alternative + risk.",
+                        "Create docs/blueprint/03-adrs/ — one ADR file per major decision. Context, Decision, Consequences, Alternatives.",
+                        "Create docs/blueprint/04-fine-draft.md. Architecture: components, data model, security, test strategy.",
+                        "Create docs/blueprint/05-spec.md. Requirements with acceptance criteria. Every problem addressed.",
+                        "Create docs/blueprint/06-tasks.md. Task breakdown with checkboxes, roles, estimates, dependencies.",
+                        "Create docs/blueprint/07-progress.md. Living progress doc with status, blockers, next steps.",
+                    ];
+                    if let Some(idx) = PIPELINE.iter().position(|&p| p == phase) {
+                        if idx + 1 < PIPELINE.len() {
+                            let next_phase = PIPELINE[idx + 1];
+                            let next_instruction = INSTRUCTIONS[idx + 1];
+                            let next_task_id = format!("task_{}", ulid::Ulid::new());
+                            let next_spec = serde_json::json!({
+                                "instruction": next_instruction,
+                                "image": "localhost:30500/stronghold/rust-stable:latest",
+                                "ttl_secs": 3600,
+                                "blueprint_phase": next_phase,
+                                "machine_id": machine_id,
+                            });
+                            if let Some(mid) = &machine_id {
+                                let conn = match state.db.get() {
+                                    Ok(c) => c,
+                                    Err(_) => return Ok((StatusCode::OK, axum::Json(serde_json::json!({"status": "ok", "next_work": null})))),
+                                };
+                                let _ = conn.execute(
+                                    "INSERT INTO tasks (id, tenant_id, machine_id, spec, status, created_at)
+                                     VALUES (?1, ?2, ?3, ?4, 'queued', datetime('now'))",
+                                    rusqlite::params![next_task_id, tenant_id, mid, next_spec.to_string()],
+                                );
+                                tracing::info!(
+                                    tenant = %tenant_id,
+                                    next_task_id = %next_task_id,
+                                    next_phase = %next_phase,
+                                    "Orchestrator: auto-created next task on result submission"
+                                );
+                                return Ok((StatusCode::OK, axum::Json(serde_json::json!({
+                                    "status": "ok",
+                                    "next_work": {
+                                        "task_id": next_task_id,
+                                        "instruction": next_instruction,
+                                        "phase": next_phase,
+                                    }
+                                }))));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    } else {
+        None
+    };
+
+    Ok((StatusCode::OK, axum::Json(serde_json::json!({
+        "status": "ok",
+        "next_work": next_instruction,
+    }))))
 }
 
 // ============================================================================

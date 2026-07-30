@@ -23,6 +23,7 @@ pub mod pty;
 pub mod roles;
 pub mod tasks;
 pub mod workflows;
+pub mod next_work;
 pub mod images;
 
 use crate::crypto::hybrid_kem::PushKeys;
@@ -188,6 +189,7 @@ pub fn build_router(
         .route("/agent/task/:id/reflexion", axum::routing::post(tasks::submit_reflexion))
         .route("/agent/task/:id/reflexion", axum::routing::get(tasks::get_reflexion))
         .route("/agent/reflexions", axum::routing::get(tasks::list_reflexions))
+        .route("/agent/:machine_id/next-work", axum::routing::get(next_work::next_work))
         // Phone-side
         .route("/phone/pending", axum::routing::get(phone::pending_sse))
         .route("/phone/decide", axum::routing::post(phone::decide))
