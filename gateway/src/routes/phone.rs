@@ -177,6 +177,59 @@ pub async fn revoke(
     Ok(StatusCode::OK)
 }
 
+
+// ============================================================================
+// U1: WebAuthn ceremony generation
+// ============================================================================
+
+/// Query parameters for `POST /phone/ceremony/begin`.
+#[derive(Debug, Deserialize)]
+pub struct CeremonyBeginParams {
+    pub tenant: String,
+}
+
+/// Response wrapper for the ceremony-begin endpoint. Includes the
+/// `PublicKeyCredentialCreationOptions` plus the `challenge_id` the
+/// client must echo back to `/phone/ceremony/finish` (added in a later
+/// wave) so the gateway can look up the stored challenge.
+#[derive(Debug, Serialize)]
+pub struct CeremonyBeginResponse {
+    #[serde(flatten)]
+    pub options: crate::crypto::webauthn::PublicKeyCredentialCreationOptions,
+    pub challenge_id: String,
+}
+
+/// `POST /phone/ceremony/begin?tenant=<id>` — begin a WebAuthn
+/// registration ceremony. Generates fresh ceremony options (random
+/// 32-byte challenge, ES256+RS256 params, platform authenticator,
+/// UV required), stores the challenge in `phone_challenges`, and
+/// returns the options + challenge_id as JSON.
+pub async fn ceremony_begin(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<CeremonyBeginParams>,
+) -> Result<Json<CeremonyBeginResponse>, (StatusCode, String)> {
+    let tenant_id = params.tenant;
+    tracing::info!(tenant = %tenant_id, "Beginning WebAuthn registration ceremony");
+
+    let (options, challenge) = crate::crypto::webauthn::generate_ceremony_options(
+        &tenant_id,
+        crate::crypto::webauthn::DEFAULT_RP_ID,
+        "Stronghold",
+        &tenant_id,
+        &tenant_id,
+    );
+
+    let challenge_id = ulid::Ulid::new().to_string();
+    crate::crypto::webauthn::store_challenge(&state.db, &challenge_id, &tenant_id, &challenge)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(CeremonyBeginResponse {
+        options,
+        challenge_id,
+    }))
+}
+
+
 fn extract_phone_token(headers: &axum::http::HeaderMap) -> Result<String, (StatusCode, String)> {
     let auth = headers
         .get("authorization")

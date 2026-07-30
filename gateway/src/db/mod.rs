@@ -273,6 +273,52 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         tracing::info!("Migration 004 applied");
     }
 
+
+    // Migration 005: phone_challenges table + credentials.counter column (U1+U2).
+    let applied_005: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _migrations WHERE id = 5",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if applied_005 == 0 {
+        tracing::info!("Running migration 005: phone_challenges + credentials.counter");
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS phone_challenges (
+                id          TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL,
+                challenge   BLOB NOT NULL,
+                created_at  TEXT NOT NULL,
+                used_at     TEXT,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            );",
+        )?;
+
+        // Add counter column to credentials (for WebAuthn replay protection, U2).
+        let has_counter: bool = {
+            let mut stmt = tx.prepare("PRAGMA table_info(credentials)")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(|c| c.ok())
+                .collect();
+            cols.iter().any(|c| c == "counter")
+        };
+        if !has_counter {
+            tx.execute_batch(
+                "ALTER TABLE credentials ADD COLUMN counter INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO _migrations (id, name, applied_at) VALUES (5, 'phone_challenges_credentials_counter', datetime('now'))",
+            [],
+        )?;
+        tx.commit()?;
+        tracing::info!("Migration 005 applied");
+    }
+
     Ok(())
 }
 
@@ -343,7 +389,7 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]
