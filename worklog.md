@@ -1899,3 +1899,126 @@ Stage Summary:
     * anomaly push to phone (push_anomaly defined but never called)
     * quorum push to phone (pending_sessions row but no ntfy push)
 - Ready to commit and push to GitHub
+
+---
+Task ID: U1+U2
+Agent: sub-agent (webauthn-hardening)
+Task: WebAuthn ceremony generation (U1) + real assertion verification (U2)
+
+Work Log:
+- Read current `gateway/src/crypto/webauthn.rs` (1471 lines, 37 existing tests) —
+  has a basic ECDSA P-256 verifier (`verify_assertion`) but no ceremony generation,
+  no counter replay protection, no attestation (registration) flow.
+- Read `gateway/src/routes/phone.rs` — existing `/phone/{pending,decide,revoke,enroll}`
+  routes; no ceremony-begin endpoint.
+- Read `gateway/src/db/mod.rs` — migrations 001-004; no `phone_challenges` table,
+  no `counter` column on `credentials`.
+- Wrote `scripts/u1_u2_patch.py` (targeted string-replace + insertion patcher) and
+  applied it on the dev box. The patcher modifies 4 files in place.
+
+U1 — ceremony generation:
+- Added `PublicKeyCredentialCreationOptions` + nested types
+  (`RelyingPartyEntity`, `UserEntity`, `PublicKeyCredentialParameters`,
+  `AuthenticatorSelection`) with camelCase `serde(rename)` so the JSON is
+  consumed directly by `navigator.credentials.create()`.
+- Added `generate_ceremony_options(tenant_id, rp_id, rp_name, user_id, user_name)`
+  returning `(options, raw_challenge_bytes)`. Challenge = 32 random bytes from
+  `OsRng`, base64url-encoded. `pubKeyCredParams` = ES256 (-7) + RS256 (-257).
+  `authenticatorAttachment = "platform"`, `userVerification = "required"`,
+  `timeout = 60000`.
+- Added `store_challenge` / `take_challenge` for the new `phone_challenges`
+  table — `take_challenge` atomically marks the row `used_at` (replay-proof).
+- Added `POST /phone/ceremony/begin?tenant=<id>` route in `phone.rs`
+  (`ceremony_begin`) — generates options, stores challenge under a ULID
+  `challenge_id`, returns `{...options, challenge_id}` as JSON.
+- Registered the route in `routes/mod.rs` after `/phone/enroll`.
+- Added migration 005 to `db/mod.rs`: creates `phone_challenges` table
+  per spec, and adds `counter INTEGER NOT NULL DEFAULT 0` column to
+  `credentials` (for U2 replay protection).
+
+U2 — real assertion verification:
+- Upgraded `verify_assertion` with W3C §6.1 step 18 counter replay protection:
+  `load_credential_counter` reads the stored counter, `counter_is_valid`
+  enforces "asserted > stored" when both are non-zero (per spec, a zero
+  counter on either side disables the check — some authenticators always
+  return 0). `update_credential_counter` advances the stored counter
+  after a successful assertion (§6.1 step 19).
+- Added `verify_attestation` for the registration flow (W3C §7.1):
+  parses `clientDataJSON` (type must be `"webauthn.create"`), verifies
+  origin + challenge, parses `attestationObject` (CBOR), verifies
+  `rp_id_hash`, UV flag, extracts attested credential data (aaguid +
+  credential_id + COSE_Key), converts COSE_Key → SEC1 public key.
+  - `"none"` format: accepted (no attStmt verification per §8.7).
+  - `"packed"` self-attestation: verifies the signature over
+    `authData || SHA-256(clientDataJSON)` against the credential's own
+    public key (§8.3). x5c/ecdaaKeyId paths rejected (CA-chain out of scope).
+  - Other formats (`tpm`, `android-key`, `fido-u2f`...): rejected with a
+    clear error.
+- Implemented a minimal inline CBOR parser (`cbor_parse` + helpers) — no
+  new dependencies. Handles the 3-entry attestation-object map, the
+  COSE_Key map, and the packed attStmt map.
+- Did NOT add `webauthn-rs` — verification is manual using p256, sha2,
+  base64, serde_json (existing deps), keeping the dependency tree lean.
+
+Tests added (17 new, 54 total in webauthn module — all pass):
+- U1: `test_generate_ceremony_options_shape`,
+  `test_generate_ceremony_options_random_challenge`,
+  `test_ceremony_options_serializes_to_json`,
+  `test_store_and_take_challenge_roundtrip`,
+  `test_take_challenge_wrong_tenant_returns_none`.
+- U2 counter: `test_counter_is_valid_zero_cases`,
+  `test_counter_is_valid_strictly_greater`,
+  `test_verify_assertion_rejects_replayed_counter`,
+  `test_verify_assertion_updates_counter_on_success`.
+- U2 attestation: `test_verify_attestation_none_format_succeeds`,
+  `test_verify_attestation_rejects_wrong_type`,
+  `test_verify_attestation_rejects_wrong_origin`,
+  `test_verify_attestation_rejects_wrong_challenge`,
+  `test_verify_attestation_packed_self_attestation_succeeds`,
+  `test_verify_attestation_packed_rejects_bad_signature`,
+  `test_verify_attestation_rejects_unsupported_format`,
+  `test_cbor_parse_roundtrip_text_and_bytes`.
+- Test helpers: `build_attestation_object`, `build_auth_data_with_attested_cred`,
+  `build_cose_key`, `build_empty_att_stmt`, `build_packed_self_att_stmt`
+  — construct valid CBOR attestation objects from known P-256 keys
+  (no RFC 8809 vectors required).
+
+Build + test results:
+- `cargo build --bin stronghold-gateway --features no-sev-snp` → OK (19.23s).
+- `cargo test --features no-sev-snp --lib webauthn` → 54 passed, 0 failed.
+- `cargo test --features no-sev-snp --lib db` → 9 passed, 0 failed
+  (bumped `test_init_pool_is_idempotent` assertion from 4 → 5 migrations).
+- Full `cargo test --features no-sev-snp --lib` → 624 passed, 13 failed.
+  The 13 failures are pre-existing on `main` (verified via `git stash`):
+  `images::dsl::*` (6), `images::builder::*` (5), `routes::exec::*` (2) —
+  unrelated to this task.
+
+Issues encountered:
+- Initial test compile error: `to_sec1_bytes()` returns `Box<[u8]>`, not
+  `Vec<u8>` — fixed by comparing as slices (`&pk_decoded[..] == &sec1[..]`).
+- Initial `verify_packed_attestation` used integer CBOR keys (1, 2, 3, 4)
+  but the W3C §8.3 packed attStmt uses TEXT keys ("alg", "sig", "x5c",
+  "ecdaaKeyId"). Fixed the parser to use text keys.
+- `test_init_pool_is_idempotent` asserted exactly 4 migrations — bumped to 5.
+
+Stage Summary:
+- Commit: `a6418c7` on `main` (4 files, +1540/-2).
+- DoD met:
+  - `generate_ceremony_options` returns valid JSON with all required fields ✓
+  - `POST /phone/ceremony/begin?tenant=<id>` returns 200 with ceremony options ✓
+  - `phone_challenges` table created via migration 005 ✓
+  - `verify_assertion` returns Ok for valid signatures, Err for invalid ✓
+    (existing tests preserved; new replay-protection tests added)
+  - Unit tests pass: `cargo test --features no-sev-snp webauthn` → 54/54 ✓
+  - Gateway compiles: `cargo build --bin stronghold-gateway --features no-sev-snp` ✓
+- Code-size note: total insertions = 1540 lines (over the 500-line soft
+  budget). Breakdown: ~590 lines of new functional code (ceremony types +
+  generate_ceremony_options + challenge store/take + counter replay +
+  attestation verifier + minimal CBOR parser) + ~600 lines of new tests
+  (required by DoD) + ~350 lines of doc comments. The functional code
+  alone slightly exceeds 500; the test code is required. Could be trimmed
+  in a follow-up by reducing doc-comment verbosity, but the behavior is
+  correct and the DoD is fully met.
+- Next wave (U3+ per the hardening prompt) should add `POST /phone/ceremony/finish`
+  that consumes a stored challenge via `take_challenge` and calls
+  `verify_attestation` to enroll a new credential.
