@@ -148,8 +148,9 @@ fn get_active_machines(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tenant_id, t.id, t.spec
          FROM machines m
-         LEFT JOIN tasks t ON t.machine_id = m.id AND t.status = 'running'
-         WHERE m.status = 'active'",
+         INNER JOIN tasks t ON t.machine_id = m.id AND t.status IN ('running', 'queued')
+         WHERE m.status = 'active'
+         AND m.created_at > datetime('now', '-1 day')",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((

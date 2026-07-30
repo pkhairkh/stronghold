@@ -467,6 +467,55 @@ pub async fn submit_result(
         "Task result submitted"
     );
 
+    // CC2: Post task_completed on the message bus so other agents know
+    // this phase is done and can pick up the next one.
+    {
+        let bus_channel = format!("project-{}", tenant_id);
+        let bus_body = serde_json::json!({
+            "role": "agent",
+            "type": "task_completed",
+            "task_id": task_id,
+            "exit_code": req.exit_code,
+            "summary": req.summary,
+        });
+        if let Ok(conn) = state.db.get() {
+            let _ = conn.execute(
+                "INSERT INTO agent_messages (from_machine, to_machine, channel, body, created_at)
+                 VALUES (?1, NULL, ?2, ?3, datetime('now'))",
+                rusqlite::params![machine_id.as_deref().unwrap_or(""), bus_channel, bus_body.to_string()],
+            );
+            tracing::info!(tenant = %tenant_id, task_id = %task_id, "CC2: posted task_completed on message bus");
+        }
+    }
+
+    // CD2: Verify the agent committed before creating the next task.
+    // Check for a git_commit audit entry for this machine since the task was assigned.
+    if status == "completed" {
+        if let Some(ref mid) = machine_id {
+            let has_commit: bool = {
+                let conn = match state.db.get() {
+                    Ok(c) => c,
+                    Err(_) => return Ok((StatusCode::OK, axum::Json(serde_json::json!({"status": "ok", "next_work": null})))),
+                };
+                conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM audit_entries
+                     WHERE machine_id = ?1 AND event = 'git_commit'
+                     AND ts > (SELECT created_at FROM tasks WHERE id = ?2)",
+                    rusqlite::params![mid, task_id],
+                    |row| row.get(0),
+                ).unwrap_or(true) // don't block on query errors
+            };
+            if !has_commit {
+                tracing::warn!(task_id = %task_id, machine_id = %mid, "CD2: no git_commit found — refusing to create next task");
+                return Ok((StatusCode::OK, axum::Json(serde_json::json!({
+                    "status": "error",
+                    "message": "no commit found for this task — commit before submitting result",
+                    "next_work": null,
+                }))));
+            }
+        }
+    }
+
     // AUTO-CREATE NEXT TASK: The orchestrator immediately creates the next
     // blueprint task so the agent can continue working without stopping.
     // This prevents the agent from emitting EOS — there is ALWAYS more work.
