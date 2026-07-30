@@ -35,14 +35,15 @@
 //!       **skip** (condition not met). Skipped steps are recorded as completed
 //!       with a `{"result":{"skipped":true}}` placeholder so downstream steps
 //!       can proceed.
-//!    c. Spawn one [`tokio::task`] per step to run. Each inserts a row into
-//!       `tasks` with `status='queued'` and `workflow_run_id=<run_id>`, then
-//!       polls every 1 s (up to 30 min per attempt) for a terminal status.
+//!    c. Spawn one [`tokio::task`] per runnable step. Each task calls
+//!       [`crate::workflow::executor::execute_step`], which schedules a fresh
+//!       `wf-*` pod, waits for `Ready`, runs `sh -c "<task>"` via `kube exec`,
+//!       captures stdout/stderr/exit_code, and kills the pod.
 //!    d. On `completed`: store the result, add to `completed_steps`.
 //!       On `failed` (after `max_retries`): store the result, mark the run
 //!       `failed` and stop.
-//!    e. Update `workflow_runs.current_steps` / `completed_steps` after each
-//!       batch.
+//!    e. Update `workflow_runs.current_steps` / `completed_steps` /
+//!       `step_results` after each batch.
 //! 4. When all steps are completed (or skipped), mark the run `completed`.
 //! 5. Write an audit entry (`workflow_completed` / `workflow_failed`).
 //!
@@ -66,12 +67,6 @@ use anyhow::{anyhow, Result};
 use rusqlite::params;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-
-/// How long a single task attempt may run before the executor gives up on it.
-const STEP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// Poll interval while waiting for a task to reach a terminal status.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 // ============================================================================
 // DAG types
@@ -139,14 +134,9 @@ impl Step {
 
 /// Execute a workflow run to completion (or failure).
 ///
-/// Loads the DAG from the database, walks it in dependency order, launches
-/// ready steps concurrently, polls the `tasks` table for each step's result,
-/// and finally updates `workflow_runs.status` and writes an audit entry.
-///
-/// This function is designed to be `tokio::spawn`'d by the route handler —
-/// it takes ownership of a cloned [`AppState`] and an owned `run_id` (the
-/// public signature takes `&str` for ergonomic call sites; callers that
-/// spawn it on a separate task must clone to a `String` first).
+/// Thin spawn-friendly wrapper around [`advance_dag`]: takes ownership of
+/// an [`AppState`] (so it can be `tokio::spawn`'d by the route handler)
+/// and delegates the actual work to `advance_dag(&state, run_id)`.
 ///
 /// # Errors
 /// Returns an error if:
@@ -155,6 +145,34 @@ impl Step {
 /// - the DAG has a cycle (no ready steps, not all completed),
 /// - a database error occurs.
 pub async fn execute(run_id: &str, state: AppState) -> Result<()> {
+    advance_dag(&state, run_id).await
+}
+
+/// Drive a workflow run to completion (or failure).
+///
+/// This is the **V2** DAG advancement entry point. It:
+/// 1. Loads the run + workflow + DAG from the database.
+/// 2. Marks the run `running`.
+/// 3. Walks the DAG via [`execute_dag`]: finds ready steps, partitions by
+///    `condition`, launches the runnable ones concurrently via
+///    [`tokio::spawn`] (each calling [`crate::workflow::executor::execute_step`]),
+///    retries failures up to `max_retries`, evaluates downstream conditions,
+///    and persists `current_steps` / `completed_steps` / `step_results`
+///    after each wave.
+/// 4. Finalizes the run status (`completed` or `failed`) + `finished_at`.
+/// 5. Writes a `workflow_completed` / `workflow_failed` audit entry.
+///
+/// Step results are persisted to `workflow_runs.step_results` as a JSON map
+/// `{step_id: {exit_code, stdout, stderr, duration_ms}}` after each wave.
+///
+/// # Errors
+/// - `Failed to load workflow run …` — run_id doesn't exist.
+/// - `Invalid DAG JSON …` — workflow.dag is malformed.
+/// - `Workflow stuck: … of … steps completed, none ready` — DAG has a cycle
+///   or a step depends on a step that was skipped/failed and never made it
+///   into `completed`.
+/// - `One or more steps failed` — a step failed after exhausting retries.
+pub async fn advance_dag(state: &AppState, run_id: &str) -> Result<()> {
     tracing::info!(run_id = run_id, "Workflow run starting");
 
     // 1. Load the run + workflow + DAG.
@@ -166,7 +184,7 @@ pub async fn execute(run_id: &str, state: AppState) -> Result<()> {
     set_run_running(&state.db, run_id)?;
 
     // 3. Walk the DAG.
-    let outcome = execute_dag(run_id, &tenant_id, &dag, &state).await;
+    let outcome = execute_dag(run_id, &tenant_id, &dag, state).await;
 
     // 4. Finalize the run status + timestamp.
     let (final_status, event) = match &outcome {
@@ -268,6 +286,7 @@ async fn execute_dag(
         }
         if !to_skip.is_empty() {
             update_step_arrays(&state.db, run_id, &[], &completed)?;
+            update_step_results(&state.db, run_id, &results)?;
         }
 
         if to_run.is_empty() {
@@ -314,8 +333,9 @@ async fn execute_dag(
             }
         }
 
-        // Persist the updated completed_steps.
+        // Persist the updated completed_steps + step_results.
         update_step_arrays(&state.db, run_id, &[], &completed)?;
+        update_step_results(&state.db, run_id, &results)?;
 
         if batch_failed {
             return Err(anyhow!("One or more steps failed"));
@@ -326,18 +346,24 @@ async fn execute_dag(
 }
 
 // ============================================================================
-// Step execution (with retries + polling)
+// Step execution (with retries)
 // ============================================================================
 
 /// Run a step, retrying on failure up to `max_retries` times.
 ///
-/// Each attempt creates a fresh row in `tasks` (so each attempt has its own
-/// immutable spec + result). Returns the result JSON of the successful
-/// attempt, wrapped as `{"result": <task_result>}` for condition lookups.
+/// Each attempt calls [`crate::workflow::executor::execute_step`], which
+/// schedules a fresh `wf-*` pod, runs `sh -c "<task>"` via `kube exec`,
+/// captures stdout/stderr/exit_code, and tears the pod down. Returns the
+/// [`StepResult`](crate::workflow::executor::StepResult) of the successful
+/// attempt, wrapped as `{"result": <StepResult>}` so the condition
+/// evaluator can look up `<step>.result.exit_code`.
+///
+/// `tenant_id` is kept in the signature for caller symmetry but unused —
+/// `execute_step` looks up the tenant itself from `workflow_runs.tenant_id`.
 async fn run_step_with_retries(
     state: &AppState,
     run_id: &str,
-    tenant_id: &str,
+    _tenant_id: &str,
     step: &Step,
 ) -> Result<serde_json::Value> {
     let max_retries = step.effective_max_retries();
@@ -349,8 +375,10 @@ async fn run_step_with_retries(
         if attempt > 0 {
             tracing::info!(run_id = run_id, step = %step.id, attempt = attempt, "Retrying step");
         }
-        match run_step_once(state, run_id, tenant_id, step, attempt).await {
-            Ok(result) => return Ok(result),
+        match crate::workflow::executor::execute_step(state, run_id, step).await {
+            Ok(result) => {
+                return Ok(serde_json::json!({ "result": result }));
+            }
             Err(e) => {
                 last_error = e.to_string();
                 tracing::warn!(
@@ -370,129 +398,6 @@ async fn run_step_with_retries(
         max_retries,
         last_error
     ))
-}
-
-/// Run a single attempt of a step: create a queued task, then poll for its
-/// terminal status.
-///
-/// The task is inserted with `workflow_run_id = run_id` so it can be traced
-/// back to this workflow run. Polls every [`POLL_INTERVAL`] until the task
-/// reaches `completed` or `failed`, or until [`STEP_TIMEOUT`] elapses (which
-/// is treated as a failure for retry purposes).
-async fn run_step_once(
-    state: &AppState,
-    run_id: &str,
-    tenant_id: &str,
-    step: &Step,
-    attempt: i64,
-) -> Result<serde_json::Value> {
-    // Build the task spec — same shape as `CreateTaskRequest` in routes/tasks.rs.
-    let spec = serde_json::json!({
-        "instruction": step.task,
-        "image": step.effective_image(),
-        "ttl_secs": step.effective_ttl(),
-        "context": step.context,
-    });
-    let task_id = format!("task_{}", ulid::Ulid::new());
-
-    {
-        let conn = state
-            .db
-            .get()
-            .map_err(|e| anyhow!("DB pool error: {}", e))?;
-        conn.execute(
-            "INSERT INTO tasks
-             (id, tenant_id, workflow_run_id, status, spec, created_at,
-              retry_count, max_retries)
-             VALUES (?1, ?2, ?3, 'queued', ?4, datetime('now'), ?5, ?6)",
-            params![
-                task_id,
-                tenant_id,
-                run_id,
-                spec.to_string(),
-                attempt,
-                step.effective_max_retries(),
-            ],
-        )
-        .map_err(|e| anyhow!("Failed to insert task for step {}: {}", step.id, e))?;
-    }
-
-    tracing::info!(
-        run_id = run_id,
-        step = %step.id,
-        task_id = %task_id,
-        attempt = attempt,
-        "Task queued for step"
-    );
-
-    // Poll the tasks table for a terminal status.
-    let deadline = Instant::now() + STEP_TIMEOUT;
-    loop {
-        if Instant::now() > deadline {
-            return Err(anyhow!(
-                "Step {} timed out after {} seconds",
-                step.id,
-                STEP_TIMEOUT.as_secs()
-            ));
-        }
-
-        let row: Option<(String, Option<String>)> = {
-            let conn = state
-                .db
-                .get()
-                .map_err(|e| anyhow!("DB pool error: {}", e))?;
-            let r = conn.query_row(
-                "SELECT status, result FROM tasks WHERE id = ?1",
-                params![task_id],
-                |row| {
-                    let status: String = row.get(0)?;
-                    let result: Option<String> = row.get(1)?;
-                    Ok((status, result))
-                },
-            );
-            match r {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Err(anyhow!("Task {} vanished mid-poll", task_id));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %e,
-                        "Transient DB error polling task; will retry"
-                    );
-                    None
-                }
-            }
-        };
-
-        if let Some((status, result_str)) = row {
-            match status.as_str() {
-                "completed" => {
-                    let result: serde_json::Value = result_str
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    return Ok(serde_json::json!({ "result": result }));
-                }
-                "failed" | "cancelled" => {
-                    let result: serde_json::Value = result_str
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    let detail = result
-                        .get("stderr")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| result.get("summary").and_then(|v| v.as_str()))
-                        .unwrap_or("unknown error");
-                    return Err(anyhow!("Step {} attempt {} failed: {}", step.id, attempt, detail));
-                }
-                _ => {
-                    // queued / scheduled / running — keep polling.
-                }
-            }
-        }
-
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
 }
 
 // ============================================================================
@@ -701,6 +606,39 @@ fn update_step_arrays(
         params![current_json, completed_json, run_id],
     )
     .map_err(|e| anyhow!("Failed to update step arrays for run {}: {}", run_id, e))?;
+    Ok(())
+}
+
+/// Persist the per-step results map to `workflow_runs.step_results`.
+///
+/// The in-memory `results` map stores each step's outcome as
+/// `{"result": <StepResult>}` (with the `result` wrapper so the condition
+/// evaluator can look up `<step>.result.exit_code`). The `step_results`
+/// column stores the unwrapped map `{step_id: <StepResult>}` — i.e. the
+/// shape callers poll via `GET /workflow/run/:id`.
+///
+/// Skipped steps appear as `{"skipped": true}` (the inner value of their
+/// `{"result": {"skipped": true}}` placeholder).
+fn update_step_results(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    run_id: &str,
+    results: &HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    // Strip the "result" wrapper to produce {step_id: {exit_code, stdout, ...}}.
+    let mut map = serde_json::Map::new();
+    for (k, v) in results.iter() {
+        if let Some(inner) = v.get("result") {
+            map.insert(k.clone(), inner.clone());
+        }
+    }
+    let json = serde_json::Value::Object(map).to_string();
+
+    let conn = db.get().map_err(|e| anyhow!("DB pool error: {}", e))?;
+    conn.execute(
+        "UPDATE workflow_runs SET step_results = ?1 WHERE id = ?2",
+        params![json, run_id],
+    )
+    .map_err(|e| anyhow!("Failed to update step_results for run {}: {}", run_id, e))?;
     Ok(())
 }
 
@@ -1245,5 +1183,369 @@ mod tests {
         assert_eq!(ids_of(&wave2), vec!["build"]);
         let cond = wave2[0].condition.as_deref().unwrap_or("");
         assert!(evaluate_condition(cond, &results), "condition should be true");
+    }
+
+    // ─── step_results persistence ───────────────────────────────────────
+
+    /// `update_step_results` must strip the `result` wrapper from each
+    /// entry, producing a JSON map `{step_id: <StepResult>}` that callers
+    /// can poll via `GET /workflow/run/:id`.
+    #[test]
+    fn test_update_step_results_strips_wrapper() {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        // Insert a tenant + workflow + run so the UPDATE has a target row.
+        conn.execute(
+            "INSERT INTO tenants (id, name, created_at, setup_password, setup_used)
+             VALUES ('t1', 'T', datetime('now'), 'x', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflows (id, tenant_id, name, dag, status, created_at)
+             VALUES ('wf1', 't1', 'W', '{\"steps\":[]}', 'active', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, tenant_id, status, current_steps, completed_steps, started_at)
+             VALUES ('r1', 'wf1', 't1', 'running', '[]', '[]', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Two completed steps + one skipped step.
+        let mut results: HashMap<String, serde_json::Value> = HashMap::new();
+        results.insert(
+            "s1".to_string(),
+            serde_json::json!({"result": {"exit_code": 0, "stdout": "hi\n", "stderr": "", "duration_ms": 12}}),
+        );
+        results.insert(
+            "s2".to_string(),
+            serde_json::json!({"result": {"exit_code": 1, "stdout": "", "stderr": "boom", "duration_ms": 34}}),
+        );
+        results.insert(
+            "s3".to_string(),
+            serde_json::json!({"result": {"skipped": true}}),
+        );
+
+        update_step_results(&pool, "r1", &results).unwrap();
+
+        let stored: String = pool.get().unwrap()
+            .query_row(
+                "SELECT step_results FROM workflow_runs WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        // Wrapper is stripped — keys map directly to the inner StepResult.
+        assert_eq!(parsed["s1"]["exit_code"], 0);
+        assert_eq!(parsed["s1"]["stdout"], "hi\n");
+        assert_eq!(parsed["s2"]["exit_code"], 1);
+        assert_eq!(parsed["s2"]["stderr"], "boom");
+        assert_eq!(parsed["s3"]["skipped"], true);
+        // No top-level "result" key.
+        assert!(parsed.get("result").is_none());
+    }
+
+    /// `update_step_results` must produce `{}` (not `null`) when the results
+    /// map is empty — so callers can always `serde_json::from_str` the column.
+    #[test]
+    fn test_update_step_results_empty_map() {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO tenants (id, name, created_at, setup_password, setup_used)
+             VALUES ('t2', 'T', datetime('now'), 'x', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflows (id, tenant_id, name, dag, status, created_at)
+             VALUES ('wf2', 't2', 'W', '{\"steps\":[]}', 'active', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, tenant_id, status, current_steps, completed_steps, started_at)
+             VALUES ('r2', 'wf2', 't2', 'running', '[]', '[]', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let results: HashMap<String, serde_json::Value> = HashMap::new();
+        update_step_results(&pool, "r2", &results).unwrap();
+
+        let stored: String = pool.get().unwrap()
+            .query_row(
+                "SELECT step_results FROM workflow_runs WHERE id = 'r2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "{}");
+    }
+
+    // ─── advance_dag error paths (no k8s required) ──────────────────────
+
+    /// `advance_dag` on a nonexistent run_id must error out at `load_run`
+    /// before ever touching the k8s API.
+    #[tokio::test]
+    async fn test_advance_dag_unknown_run_errors() {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let keys = crate::crypto::hybrid_sig::AuditKeys::generate();
+        let push_keys = crate::crypto::hybrid_kem::PushKeys::generate();
+        let state = AppState {
+            db: pool,
+            audit_keys: keys,
+            push_keys,
+            pty_registry: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+        let err = advance_dag(&state, "nonexistent_run").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to load workflow run"),
+            "expected load_run error, got: {}",
+            msg
+        );
+    }
+
+    // ─── k3s integration (manual; #[ignore] by default) ─────────────────
+    //
+    // These tests run real `wf-*` pods on the dev box's k3s cluster. They
+    // are `#[ignore]`'d so they don't run under `cargo test workflow` (which
+    // the DoD runs in CI). Run manually with:
+    //
+    //   KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+    //     cargo test --features no-sev-snp workflow::engine -- --ignored
+    //
+    // Each test skips gracefully if the kube client can't be created.
+
+    /// Build an AppState with a tenant + workflow (dag passed in) + run row
+    /// `r1` ready for `advance_dag`.
+    fn integration_state(dag_json: &str) -> AppState {
+        let pool = crate::db::init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO tenants (id, name, created_at, setup_password, setup_used)
+             VALUES ('t_int', 'T', datetime('now'), 'x', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflows (id, tenant_id, name, dag, status, created_at)
+             VALUES ('wf_int', 't_int', 'W', ?1, 'active', datetime('now'))",
+            rusqlite::params![dag_json],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs
+             (id, workflow_id, tenant_id, status, current_steps, completed_steps, started_at)
+             VALUES ('r1', 'wf_int', 't_int', 'running', '[]', '[]', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let keys = crate::crypto::hybrid_sig::AuditKeys::generate();
+        let push_keys = crate::crypto::hybrid_kem::PushKeys::generate();
+        AppState {
+            db: pool,
+            audit_keys: keys,
+            push_keys,
+            pty_registry: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    async fn skip_if_no_k8s() -> bool {
+        // Install the rustls CryptoProvider (main.rs does this in prod, but
+        // test binaries don't run main.rs). Idempotent via `Once`.
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+        match crate::machines::scheduler::list_pods().await {
+            Ok(_) => false,
+            Err(e) => {
+                eprintln!("skipping k3s integration test: {}", e);
+                true
+            }
+        }
+    }
+
+    /// Read the run's terminal status + step_results JSON for assertions.
+    fn read_run_outcome(
+        state: &AppState,
+    ) -> (String, serde_json::Value) {
+        let conn = state.db.get().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM workflow_runs WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let step_results_str: String = conn
+            .query_row(
+                "SELECT COALESCE(step_results, '{}') FROM workflow_runs WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let step_results: serde_json::Value =
+            serde_json::from_str(&step_results_str).unwrap();
+        (status, step_results)
+    }
+
+    /// DoD: a 2-step linear DAG (s1 → s2) executes both steps in order.
+    #[tokio::test]
+    #[ignore]
+    async fn integration_linear_dag_runs_both_steps() {
+        if skip_if_no_k8s().await {
+            return;
+        }
+        // s1 writes "step1" to a file; s2 cats it and prints "step2".
+        // Both must run; s2 depends on s1.
+        let dag = r#"{
+            "steps": [
+                {"id": "s1", "task": "echo step1"},
+                {"id": "s2", "task": "echo step2", "depends_on": ["s1"]}
+            ]
+        }"#;
+        let state = integration_state(dag);
+        advance_dag(&state, "r1").await.unwrap();
+        let (status, results) = read_run_outcome(&state);
+        assert_eq!(status, "completed");
+        assert_eq!(results["s1"]["exit_code"], 0);
+        assert_eq!(results["s1"]["stdout"].as_str().unwrap().trim(), "step1");
+        assert_eq!(results["s2"]["exit_code"], 0);
+        assert_eq!(results["s2"]["stdout"].as_str().unwrap().trim(), "step2");
+
+        // No pod leaked (poll — kill_pod returns before the pod is fully reaped).
+        assert_no_workflow_pods_leaked().await;
+    }
+
+    /// DoD: a 2-step parallel DAG (s1, s2 independent) executes both.
+    ///
+    /// We can't directly assert concurrency from outside the engine, but we
+    /// verify both steps ran (both appear in step_results with exit_code 0)
+    /// and the run completed successfully.
+    #[tokio::test]
+    #[ignore]
+    async fn integration_parallel_dag_runs_both_steps() {
+        if skip_if_no_k8s().await {
+            return;
+        }
+        let dag = r#"{
+            "steps": [
+                {"id": "s1", "task": "echo a"},
+                {"id": "s2", "task": "echo b"}
+            ]
+        }"#;
+        let state = integration_state(dag);
+        advance_dag(&state, "r1").await.unwrap();
+        let (status, results) = read_run_outcome(&state);
+        assert_eq!(status, "completed");
+        assert_eq!(results["s1"]["exit_code"], 0);
+        assert_eq!(results["s2"]["exit_code"], 0);
+    }
+
+    /// DoD: a conditional DAG skips s2 if s1 "fails" (returns non-zero).
+    ///
+    /// s1 runs `exit 1` → completed with exit_code 1.
+    /// s2's condition `s1.result.exit_code == 0` is false → s2 is skipped.
+    /// Run status is "completed" because skipped steps count as completed.
+    #[tokio::test]
+    #[ignore]
+    async fn integration_conditional_dag_skips_on_failure() {
+        if skip_if_no_k8s().await {
+            return;
+        }
+        let dag = r#"{
+            "steps": [
+                {"id": "s1", "task": "exit 1", "max_retries": 0},
+                {"id": "s2", "task": "echo should_not_run",
+                 "depends_on": ["s1"], "condition": "s1.result.exit_code == 0"}
+            ]
+        }"#;
+        let state = integration_state(dag);
+        advance_dag(&state, "r1").await.unwrap();
+        let (status, results) = read_run_outcome(&state);
+        assert_eq!(status, "completed");
+        // s1 ran and returned non-zero — but the step itself succeeded.
+        assert_eq!(results["s1"]["exit_code"], 1);
+        // s2 was skipped (condition false).
+        assert_eq!(results["s2"]["skipped"], true);
+        // The skipped step did NOT actually run its task — verify by checking
+        // there's no exit_code field on the s2 entry.
+        assert!(
+            results["s2"].get("exit_code").is_none(),
+            "skipped step should not have an exit_code; got: {}",
+            results["s2"]
+        );
+    }
+
+    /// DoD: run status transitions to `failed` when a step errors (not just
+    /// returns non-zero — actually errors, e.g. the task spec is invalid).
+    ///
+    /// We force an error by giving the step an image that doesn't exist; the
+    /// scheduler will create the pod but it will never reach Ready (ErrImagePull /
+    /// ImagePullBackOff), and `wait_for_pod_ready` will time out → `execute_step`
+    /// returns Err → `run_step_with_retries` exhausts retries → `execute_dag`
+    /// returns Err → `advance_dag` finalizes the run as `failed`.
+    #[tokio::test]
+    #[ignore]
+    async fn integration_failed_step_marks_run_failed() {
+        if skip_if_no_k8s().await {
+            return;
+        }
+        // Use a non-existent image — k8s will fail to pull it.
+        // The readiness timeout in executor.rs is 120s; with max_retries=0
+        // the total test time is ~120s. Marked #[ignore] so it only runs
+        // when explicitly requested.
+        let dag = r#"{
+            "steps": [
+                {"id": "s1", "task": "echo hello",
+                 "image": "localhost:30500/stronghold/does-not-exist:latest",
+                 "max_retries": 0}
+            ]
+        }"#;
+        let state = integration_state(dag);
+        // advance_dag returns Err, but still finalizes the run as "failed".
+        let _ = advance_dag(&state, "r1").await;
+        let (status, _results) = read_run_outcome(&state);
+        assert_eq!(
+            status, "failed",
+            "run with a failing step should be marked failed"
+        );
+
+        // No pod leaked even on failure (poll — kill_pod returns before the
+        // pod is fully reaped).
+        assert_no_workflow_pods_leaked().await;
+    }
+
+    /// Poll `list_pods` for up to ~15s waiting for all `wf-*` pods to
+    /// disappear. `kill_pod` returns as soon as deletion is initiated, but
+    /// the pod may remain visible (in `Terminating` state) for a few seconds
+    /// while k8s actually reaps it.
+    async fn assert_no_workflow_pods_leaked() {
+        for _ in 0..30 {
+            let pods = crate::machines::scheduler::list_pods().await.unwrap();
+            let leaked: Vec<_> = pods.iter().filter(|p| p.starts_with("wf-")).collect();
+            if leaked.is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let pods = crate::machines::scheduler::list_pods().await.unwrap();
+        let leaked: Vec<_> = pods.iter().filter(|p| p.starts_with("wf-")).collect();
+        assert!(leaked.is_empty(), "workflow pods leaked: {:?}", leaked);
     }
 }

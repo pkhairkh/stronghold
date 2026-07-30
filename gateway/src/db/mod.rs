@@ -319,6 +319,45 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         tracing::info!("Migration 005 applied");
     }
 
+    // Migration 006: add step_results column to workflow_runs (V1+V2).
+    //
+    // Stores a JSON map `{step_id: {exit_code, stdout, stderr, duration_ms}}`
+    // written by `workflow::engine::update_step_results` after each wave.
+    let applied_006: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM _migrations WHERE id = 6",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if applied_006 == 0 {
+        tracing::info!("Running migration 006: add step_results to workflow_runs");
+        let tx = conn.unchecked_transaction()?;
+
+        // Check if the column already exists (handles fresh DBs where a
+        // future schema.sql may include it, vs upgraded DBs where it needs
+        // ALTER TABLE).
+        let has_column: bool = {
+            let mut stmt = tx.prepare("PRAGMA table_info(workflow_runs)")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(|c| c.ok())
+                .collect();
+            cols.iter().any(|c| c == "step_results")
+        };
+        if !has_column {
+            tx.execute_batch(
+                "ALTER TABLE workflow_runs ADD COLUMN step_results TEXT;",
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO _migrations (id, name, applied_at) VALUES (6, 'add_step_results', datetime('now'))",
+            [],
+        )?;
+        tx.commit()?;
+        tracing::info!("Migration 006 applied");
+    }
+
     Ok(())
 }
 
@@ -385,11 +424,11 @@ mod tests {
         let pool2 = init_pool(db_path.to_str().unwrap()).unwrap();
         let conn = pool2.get().unwrap();
 
-        // _migrations should show exactly 2 migrations applied.
+        // _migrations should show exactly 6 migrations applied.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
     }
 
     #[test]
@@ -456,6 +495,26 @@ mod tests {
         assert!(
             tables.contains(&"agent_messages".to_string()),
             "agent_messages table missing"
+        );
+    }
+
+    /// Migration 006 adds a `step_results` column to `workflow_runs`.
+    /// Verify the column exists after `init_memory_pool` runs migrations.
+    #[test]
+    fn test_workflow_runs_has_step_results_column() {
+        let pool = init_memory_pool().unwrap();
+        let conn = pool.get().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(workflow_runs)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "step_results"),
+            "step_results column missing on workflow_runs; got columns: {:?}",
+            cols
         );
     }
 

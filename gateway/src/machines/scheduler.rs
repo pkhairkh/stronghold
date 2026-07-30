@@ -240,6 +240,103 @@ pub async fn schedule(
     })
 }
 
+/// Schedule a pod for a workflow step.
+///
+/// Same shape as an agent pod (sleep-infinity command, runAsUser 1000,
+/// fsGroup 1000, /home/dev/work + /home/dev/.cache volume mounts) but:
+/// - named with a `wf-` prefix so workflow pods are distinguishable from
+///   agent pods in `kubectl get pods`;
+/// - labelled `app=stronghold-workflow` (vs `stronghold-agent`) for the
+///   same reason;
+/// - no shared workspace PVC — workflow pods are ephemeral and don't need
+///   cross-agent collaboration, so an `emptyDir` is enough (and avoids
+///   `local-path`'s `ReadWriteOnce` co-location constraint);
+/// - no tenant credential env-var injection (workflow steps run trusted
+///   build/test tasks, not arbitrary agent code that needs secrets);
+/// - a smaller default compute footprint (1 CPU / 2 GiB vs the agent's
+///   4 CPU / 8 GiB) — callers that need more should add a `compute` field
+///   to the workflow `Step` struct.
+///
+/// Used by [`crate::workflow::executor::execute_step`].
+pub async fn schedule_workflow_pod(
+    _state: &AppState,
+    tenant_id: &str,
+    image: &str,
+) -> Result<ScheduledMachine> {
+    // Generate pod name — lowercase ULID with `wf-` prefix (RFC 1123 safe).
+    let pod_name = format!("wf-{}", ulid::Ulid::new().to_string().to_lowercase());
+
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
+
+    let cpu_req = "1000m";
+    let mem_req = "2Gi";
+
+    let pod: Pod = serde_json::from_value(serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "labels": {
+                "app": "stronghold-workflow",
+                "tenant": tenant_id,
+                "machine-id": &pod_name,
+            }
+        },
+        "spec": {
+            "containers": [{
+                "name": "workspace",
+                "image": image,
+                "command": ["sleep", "infinity"],
+                "resources": {
+                    "limits": { "cpu": cpu_req, "memory": mem_req },
+                    "requests": { "cpu": cpu_req, "memory": mem_req }
+                },
+                "volumeMounts": [
+                    {"name": "work", "mountPath": "/home/dev/work"},
+                    {"name": "cache", "mountPath": "/home/dev/.cache"}
+                ]
+            }],
+            "volumes": [
+                {"name": "work", "emptyDir": {}},
+                {"name": "cache", "emptyDir": {}}
+            ],
+            "restartPolicy": "Never",
+            "securityContext": {
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "fsGroupChangePolicy": "OnRootMismatch"
+            }
+        }
+    }))?;
+
+    if let Err(e) = pods.create(&Default::default(), &pod).await {
+        let err_str = format!("{e:#}");
+        tracing::error!(
+            pod = %pod_name,
+            tenant = tenant_id,
+            image = image,
+            error = %err_str,
+            "k8s workflow pod create failed"
+        );
+        return Err(e).context("failed to create workflow pod");
+    }
+
+    tracing::info!(
+        tenant = tenant_id,
+        pod = %pod_name,
+        image = image,
+        "Workflow pod scheduled"
+    );
+
+    Ok(ScheduledMachine {
+        id: pod_name,
+        worker: "k3s-default".to_string(),
+        sev_snp_attested: false,
+    })
+}
+
 /// Kill a pod.
 pub async fn kill_pod(_state: &AppState, machine_id: &str) -> Result<()> {
     tracing::info!(machine = machine_id, "Killing pod");
@@ -250,6 +347,33 @@ pub async fn kill_pod(_state: &AppState, machine_id: &str) -> Result<()> {
     match pods.delete(machine_id, &DeleteParams::default()).await {
         Ok(_) => {
             tracing::info!(machine = machine_id, "Pod deleted");
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            tracing::warn!(machine = machine_id, "Pod not found (already deleted?)");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Force-kill a pod with `grace_period_seconds = 0`.
+///
+/// Like [`kill_pod`] but skips the pod's `terminationGracePeriodSeconds`
+/// (default 30s) so the container is SIGKILL'd immediately. Used by the
+/// workflow executor ([`crate::workflow::executor::execute_step`]) where
+/// fast cleanup matters more than graceful shutdown — workflow steps have
+/// already captured their stdout/stderr by the time cleanup runs.
+pub async fn kill_pod_force(_state: &AppState, machine_id: &str) -> Result<()> {
+    tracing::info!(machine = machine_id, "Force-killing pod");
+
+    let client = get_kube_client().await?;
+    let pods: Api<Pod> = Api::default_namespaced(client);
+    let dp = DeleteParams::default().grace_period(0);
+
+    match pods.delete(machine_id, &dp).await {
+        Ok(_) => {
+            tracing::info!(machine = machine_id, "Pod force-deleted");
             Ok(())
         }
         Err(kube::Error::Api(e)) if e.code == 404 => {
