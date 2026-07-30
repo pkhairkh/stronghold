@@ -14,7 +14,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 
-use crate::routes::phone::EnrollRequest;
+use crate::crypto::webauthn::AttestationResult;
 
 /// Verify an agent token and return the associated tenant_id.
 pub fn verify_agent_token(db: &Pool<SqliteConnectionManager>, token: &str) -> Result<String> {
@@ -69,56 +69,51 @@ pub fn verify_setup_password(db: &Pool<SqliteConnectionManager>, password: &str)
     Ok(())
 }
 
-/// Enroll a new WebAuthn credential.
-pub fn enroll_credential(
+/// Store a verified WebAuthn credential in the `credentials` table. Called
+/// after `crypto::webauthn::verify_attestation` has confirmed the
+/// attestation's authenticity — the caller passes the resulting
+/// `AttestationResult` (extracted credential_id, SEC1 public key, aaguid,
+/// initial sign_count, fmt).
+///
+/// Returns the ULID row id of the newly-inserted credential row.
+///
+/// Replaces the legacy `enroll_credential` flow (U3): the old flow trusted
+/// a client-supplied `public_key` after only a setup_password check; the new
+/// flow only stores a credential whose attestation has been cryptographically
+/// verified against the challenge stored in `phone_challenges`.
+pub fn store_credential_from_attestation(
     db: &Pool<SqliteConnectionManager>,
-    req: &EnrollRequest,
+    tenant_id: &str,
+    attestation: &AttestationResult,
+    name: &str,
 ) -> Result<String> {
     let conn = db.get()?;
-
-    // Find the tenant by setup password
-    let password_hash = hash_token(&req.setup_password);
-    let tenant_id: String = conn.query_row(
-        "SELECT id FROM tenants WHERE setup_password = ?1 AND setup_used = 0",
-        params![password_hash],
-        |row| row.get(0),
-    )?;
-
-    // Store the credential
-    let cred_id = ulid::Ulid::new().to_string();
+    let cred_row_id = ulid::Ulid::new().to_string();
     conn.execute(
         "INSERT INTO credentials
-         (id, tenant_id, credential_id, public_key, aaguid, transports, name, verified, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, datetime('now'))",
+         (id, tenant_id, credential_id, public_key, aaguid, transports, name,
+          verified, counter, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, 1, ?7, datetime('now'))",
         params![
-            cred_id,
+            cred_row_id,
             tenant_id,
-            req.credential_id,
-            req.public_key,
-            req.aaguid,
-            req.transports.join(","),
-            req.name,
+            attestation.credential_id,
+            attestation.public_key,
+            attestation.aaguid,
+            name,
+            attestation.sign_count,
         ],
     )?;
 
-    // Mark setup password as used
-    conn.execute(
-        "UPDATE tenants SET setup_used = 1 WHERE id = ?1",
-        params![tenant_id],
-    )?;
+    tracing::info!(
+        tenant_id = %tenant_id,
+        cred_row = %cred_row_id,
+        credential_id = %attestation.credential_id,
+        fmt = %attestation.fmt,
+        "Credential stored after verified attestation"
+    );
 
-    // Generate a phone token for this tenant
-    let phone_token = generate_random_token();
-    let phone_token_hash = hash_token(&phone_token);
-    conn.execute(
-        "INSERT INTO phone_tokens (tenant_id, token_hash, created_at)
-         VALUES (?1, ?2, datetime('now'))",
-        params![tenant_id, phone_token_hash],
-    )?;
-
-    tracing::info!(tenant_id = %tenant_id, cred_id = %cred_id, "Credential enrolled");
-
-    Ok(tenant_id)
+    Ok(cred_row_id)
 }
 
 /// Mint a new agent token (called by the CLI).

@@ -698,6 +698,40 @@ pub fn take_challenge(
     }
 }
 
+/// Look up and atomically consume a ceremony challenge by `challenge_id`
+/// alone, **without** a tenant_id constraint. Returns the `(tenant_id,
+/// challenge)` pair so the caller (e.g. `POST /phone/enroll` or
+/// `POST /phone/ceremony/finish`) can bind the stored credential to the
+/// correct tenant.
+///
+/// Returns `Ok(None)` if the challenge doesn't exist or was already used.
+pub fn take_challenge_by_id(
+    db: &Pool<SqliteConnectionManager>,
+    challenge_id: &str,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let conn = db.get()?;
+    let row: Option<(String, Vec<u8>)> = match conn.query_row(
+        "SELECT tenant_id, challenge FROM phone_challenges
+         WHERE id = ?1 AND used_at IS NULL",
+        params![challenge_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    ) {
+        Ok(r) => Some(r),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    if let Some((tenant_id, challenge)) = row {
+        conn.execute(
+            "UPDATE phone_challenges SET used_at = datetime('now') WHERE id = ?1",
+            params![challenge_id],
+        )?;
+        Ok(Some((tenant_id, challenge)))
+    } else {
+        Ok(None)
+    }
+}
+
 // ============================================================================
 // U2: Real WebAuthn assertion verification — counter replay protection
 // ============================================================================

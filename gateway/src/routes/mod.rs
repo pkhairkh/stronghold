@@ -194,6 +194,7 @@ pub fn build_router(
         .route("/phone/revoke", axum::routing::post(phone::revoke))
         .route("/phone/enroll", axum::routing::post(phone::enroll))
         .route("/phone/ceremony/begin", axum::routing::post(phone::ceremony_begin))
+        .route("/phone/ceremony/finish", axum::routing::post(phone::ceremony_finish))
         // Admin
         .route("/admin/tenant", axum::routing::post(admin::create_tenant))
         .route("/admin/tenant/:id", axum::routing::get(admin::get_tenant))
