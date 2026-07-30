@@ -31,6 +31,10 @@ pub enum Decision {
 }
 
 /// Create a pending session (before phone approval).
+///
+/// Also seeds a `phone_challenges` row bound to this session so that
+/// `POST /phone/decide` can verify the WebAuthn assertion against the
+/// correct challenge.
 pub fn create_pending(
     db: &Pool<SqliteConnectionManager>,
     tenant_id: &str,
@@ -44,6 +48,17 @@ pub fn create_pending(
          (id, tenant_id, image, ttl_secs, reason, status, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 'pending', datetime('now'))",
         params![session_id, tenant_id, req.image, req.ttl_secs, req.reason],
+    )?;
+
+    // Seed a phone_challenges row for this session so /phone/decide can
+    // verify the WebAuthn assertion. The challenge is derived from the
+    // session_id (deterministic) so the phone can sign it during the
+    // decide ceremony.
+    let challenge = crate::crypto::webauthn::generate_challenge("", &session_id, "");
+    conn.execute(
+        "INSERT INTO phone_challenges (id, tenant_id, challenge, created_at)
+         VALUES (?1, ?2, ?3, datetime('now'))",
+        params![session_id, tenant_id, challenge],
     )?;
 
     Ok(session_id)
